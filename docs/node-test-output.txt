@@ -1,0 +1,254 @@
+
+> stratum-frame@1.0.0 test
+> node --test tests/*.test.mjs
+
+TAP version 13
+# Subtest: Cantilever tip bending, global Y
+ok 1 - Cantilever tip bending, global Y
+  ---
+  duration_ms: 1.454288
+  type: 'test'
+  ...
+# Subtest: Cantilever tip bending, global Z
+ok 2 - Cantilever tip bending, global Z
+  ---
+  duration_ms: 0.16904
+  type: 'test'
+  ...
+# Subtest: Cantilever axial extension PL/EA
+ok 3 - Cantilever axial extension PL/EA
+  ---
+  duration_ms: 0.078917
+  type: 'test'
+  ...
+# Subtest: Cantilever torsion TL/GJ
+ok 4 - Cantilever torsion TL/GJ
+  ---
+  duration_ms: 0.069804
+  type: 'test'
+  ...
+# Subtest: Cantilever UDL qL⁴/8EI and moment equilibrium
+ok 5 - Cantilever UDL qL⁴/8EI and moment equilibrium
+  ---
+  duration_ms: 0.109492
+  type: 'test'
+  ...
+# Subtest: Simply supported UDL midspan 5qL⁴/384EI
+ok 6 - Simply supported UDL midspan 5qL⁴/384EI
+  ---
+  duration_ms: 0.077485
+  type: 'test'
+  ...
+# Subtest: Fixed/fixed UDL interior qL⁴/384EI, zero free DOFs
+ok 7 - Fixed/fixed UDL interior qL⁴/384EI, zero free DOFs
+  ---
+  duration_ms: 0.062262
+  type: 'test'
+  ...
+# Subtest: Fixed/fixed concentrated midpoint PL³/192EI
+ok 8 - Fixed/fixed concentrated midpoint PL³/192EI
+  ---
+  duration_ms: 0.067309
+  type: 'test'
+  ...
+# Subtest: Interior point load cantilever tip Pa²(3L−a)/6EI
+ok 9 - Interior point load cantilever tip Pa²(3L−a)/6EI
+  ---
+  duration_ms: 0.347326
+  type: 'test'
+  ...
+# Subtest: Double-ended bending releases retain exact mass and zero moments
+ok 10 - Double-ended bending releases retain exact mass and zero moments
+  ---
+  duration_ms: 0.356739
+  type: 'test'
+  ...
+# Subtest: Oblique member orientation, axial projection
+ok 11 - Oblique member orientation, axial projection
+  ---
+  duration_ms: 0.13522
+  type: 'test'
+  ...
+# Subtest: Member stiffness and mass symmetry
+ok 12 - Member stiffness and mass symmetry
+  ---
+  duration_ms: 0.06017
+  type: 'test'
+  ...
+# Subtest: Consistent mass reproduces rigid translation mass
+ok 13 - Consistent mass reproduces rigid translation mass
+  ---
+  duration_ms: 0.041412
+  type: 'test'
+  ...
+# Subtest: Cantilever fundamental frequency, 12 elements, consistent mass
+ok 14 - Cantilever fundamental frequency, 12 elements, consistent mass
+  ---
+  duration_ms: 0.036845
+  type: 'test'
+  ...
+# Subtest: Modal eigenpairs meet residual tolerance
+ok 15 - Modal eigenpairs meet residual tolerance
+  ---
+  duration_ms: 0.040369
+  type: 'test'
+  ...
+# Subtest: Exact diaphragm kinematics and global equilibrium
+ok 16 - Exact diaphragm kinematics and global equilibrium
+  ---
+  duration_ms: 0.03387
+  type: 'test'
+  ...
+# Subtest: Linear combination displacement superposition
+ok 17 - Linear combination displacement superposition
+  ---
+  duration_ms: 0.034872
+  type: 'test'
+  ...
+# Subtest: Member-force diagrams satisfy end equilibrium with UDL + point
+ok 18 - Member-force diagrams satisfy end equilibrium with UDL + point
+  ---
+  duration_ms: 0.042133
+  type: 'test'
+  ...
+# Subtest: Unrestrained rigid-body mechanism rejected
+ok 19 - Unrestrained rigid-body mechanism rejected
+  ---
+  duration_ms: 0.036845
+  type: 'test'
+  ...
+# Subtest: Loaded released zero-stiffness joint rotation rejected
+ok 20 - Loaded released zero-stiffness joint rotation rejected
+  ---
+  duration_ms: 0.032839
+  type: 'test'
+  ...
+# Subtest: Zero-length element rejected
+ok 21 - Zero-length element rejected
+  ---
+  duration_ms: 0.057986
+  type: 'test'
+  ...
+# Subtest: Dimensionally incompatible user quantity rejected
+ok 22 - Dimensionally incompatible user quantity rejected
+  ---
+  duration_ms: 0.045788
+  type: 'test'
+  ...
+# Subtest: Unit conversion is SI-consistent
+ok 23 - Unit conversion is SI-consistent
+  ---
+  duration_ms: 0.037095
+  type: 'test'
+  ...
+# Subtest: Persistence round-trip preserves calculations
+ok 24 - Persistence round-trip preserves calculations
+  ---
+  duration_ms: 0.035813
+  type: 'test'
+  ...
+# Subtest: Missing references rejected on import
+ok 25 - Missing references rejected on import
+  ---
+  duration_ms: 0.034201
+  type: 'test'
+  ...
+# Subtest: Massless frame with tip mass: three finite condensed modes
+ok 26 - Massless frame with tip mass: three finite condensed modes
+  ---
+  duration_ms: 0.034271
+  type: 'test'
+  ...
+# Subtest: Self-weight reaction equals material mass times gravity
+ok 27 - Self-weight reaction equals material mass times gravity
+  ---
+  duration_ms: 0.0338
+  type: 'test'
+  ...
+# Subtest: Zero-mass modal warning preserves valid static results
+ok 28 - Zero-mass modal warning preserves valid static results
+  ---
+  duration_ms: 0.03332
+  type: 'test'
+  ...
+# Subtest: Section roll rotates unequal bending stiffness
+ok 29 - Section roll rotates unequal bending stiffness
+  ---
+  duration_ms: 0.033149
+  type: 'test'
+  ...
+# Subtest: Unsupported diaphragm support conflict rejected
+ok 30 - Unsupported diaphragm support conflict rejected
+  ---
+  duration_ms: 0.032859
+  type: 'test'
+  ...
+# Subtest: Reserved identifier rejected before object-key assembly
+ok 31 - Reserved identifier rejected before object-key assembly
+  ---
+  duration_ms: 0.035493
+  type: 'test'
+  ...
+# Subtest: Duplicate reference story elevations rejected
+ok 32 - Duplicate reference story elevations rejected
+  ---
+  duration_ms: 0.034051
+  type: 'test'
+  ...
+# Subtest: Transactions are atomic on validation error
+ok 33 - Transactions are atomic on validation error
+  ---
+  duration_ms: 2.463026
+  type: 'test'
+  ...
+# Subtest: Undo and redo restore the exact structural snapshot
+ok 34 - Undo and redo restore the exact structural snapshot
+  ---
+  duration_ms: 0.798856
+  type: 'test'
+  ...
+# Subtest: New branch clears redo and no-op does not change history
+ok 35 - New branch clears redo and no-op does not change history
+  ---
+  duration_ms: 1.901823
+  type: 'test'
+  ...
+# Subtest: Autosave restores a validated SI project
+ok 36 - Autosave restores a validated SI project
+  ---
+  duration_ms: 1.574797
+  type: 'test'
+  ...
+# Subtest: Unavailable storage does not masquerade as a saved project
+ok 37 - Unavailable storage does not masquerade as a saved project
+  ---
+  duration_ms: 0.721802
+  type: 'test'
+  ...
+# Subtest: Storage failure retains the edit with an explicit persistence warning
+ok 38 - Storage failure retains the edit with an explicit persistence warning
+  ---
+  duration_ms: 0.625559
+  type: 'test'
+  ...
+# Subtest: History obeys count and byte limits
+ok 39 - History obeys count and byte limits
+  ---
+  duration_ms: 1.483462
+  type: 'test'
+  ...
+# Subtest: Corrupt persisted model is not accepted
+ok 40 - Corrupt persisted model is not accepted
+  ---
+  duration_ms: 0.206537
+  type: 'test'
+  ...
+1..40
+# tests 40
+# suites 0
+# pass 40
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 178.076142

@@ -1,0 +1,240 @@
+{
+  "suite": "Stratum Frame analytical verification",
+  "timestamp": "2026-09-06T21:07:00.212Z",
+  "runtime": "v22.23.2",
+  "passed": 32,
+  "total": 32,
+  "tests": [
+    {
+      "name": "Cantilever tip bending, global Y",
+      "passed": true,
+      "actual": -0.030857142857142836,
+      "expected": -0.03085714285714285,
+      "relativeError": 4.497431234013945e-16,
+      "tolerance": 1e-8
+    },
+    {
+      "name": "Cantilever tip bending, global Z",
+      "passed": true,
+      "actual": -0.007714285714285709,
+      "expected": -0.007714285714285713,
+      "relativeError": 4.497431234013945e-16,
+      "tolerance": 1e-8
+    },
+    {
+      "name": "Cantilever axial extension PL/EA",
+      "passed": true,
+      "actual": 0.000007142857142857141,
+      "expected": 0.000007142857142857141,
+      "relativeError": 0,
+      "tolerance": 1e-8
+    },
+    {
+      "name": "Cantilever torsion TL/GJ",
+      "passed": true,
+      "actual": 0.0020285096630528413,
+      "expected": 0.0020285096630528413,
+      "relativeError": 0,
+      "tolerance": 1e-8
+    },
+    {
+      "name": "Cantilever UDL qL⁴/8EI and moment equilibrium",
+      "passed": true,
+      "actual": -0.0028928571428571406,
+      "expected": -0.002892857142857142,
+      "relativeError": 4.497431234013946e-16,
+      "tolerance": 1e-8
+    },
+    {
+      "name": "Simply supported UDL midspan 5qL⁴/384EI",
+      "passed": true,
+      "actual": -0.0003013392857142857,
+      "expected": -0.00030133928571428564,
+      "relativeError": 1.798972493605578e-16,
+      "tolerance": 1e-8
+    },
+    {
+      "name": "Fixed/fixed UDL interior qL⁴/384EI, zero free DOFs",
+      "passed": true,
+      "actual": -0.00006026785714285713,
+      "expected": -0.00006026785714285713,
+      "relativeError": 0,
+      "tolerance": 1e-8
+    },
+    {
+      "name": "Fixed/fixed concentrated midpoint PL³/192EI",
+      "passed": true,
+      "actual": -0.00012053571428571426,
+      "expected": -0.00012053571428571426,
+      "relativeError": 0,
+      "tolerance": 1e-8
+    },
+    {
+      "name": "Interior point load cantilever tip Pa²(3L−a)/6EI",
+      "passed": true,
+      "actual": -0.0016045714285714276,
+      "expected": -0.0016045714285714283,
+      "relativeError": 4.054174790276994e-16,
+      "tolerance": 1e-8
+    },
+    {
+      "name": "Double-ended bending releases retain exact mass and zero moments",
+      "passed": true,
+      "actual": -0.0003013392857142857,
+      "expected": -0.00030133928571428564,
+      "relativeError": 1.798972493605578e-16,
+      "tolerance": 1e-8
+    },
+    {
+      "name": "Oblique member orientation, axial projection",
+      "passed": true,
+      "actual": 0.00000714285714285714,
+      "expected": 0.000007142857142857141,
+      "relativeError": 1.1858461261560207e-16,
+      "tolerance": 1e-8
+    },
+    {
+      "name": "Member stiffness and mass symmetry",
+      "passed": true,
+      "actual": "symmetric",
+      "expected": "symmetric"
+    },
+    {
+      "name": "Consistent mass reproduces rigid translation mass",
+      "passed": true,
+      "actual": 471.0000000000001,
+      "expected": 471.0000000000001,
+      "relativeError": 0,
+      "tolerance": 1e-8
+    },
+    {
+      "name": "Cantilever fundamental frequency, 12 elements, consistent mass",
+      "passed": true,
+      "actual": 9.283521549000502,
+      "expected": 9.283517716045335,
+      "relativeError": 4.1287745493901496e-7,
+      "tolerance": 0.00002
+    },
+    {
+      "name": "Modal eigenpairs meet residual tolerance",
+      "passed": true,
+      "actual": 2.2671091657757336e-9,
+      "expected": "< 1e-8",
+      "tolerance": 1e-8
+    },
+    {
+      "name": "Exact diaphragm kinematics and global equilibrium",
+      "passed": true,
+      "actual": 3.413699041972272e-10,
+      "expected": "< 1e-5 N / Nm"
+    },
+    {
+      "name": "Linear combination displacement superposition",
+      "passed": true,
+      "actual": 2.710505431213761e-20,
+      "expected": "< 1e-12 m / rad"
+    },
+    {
+      "name": "Member-force diagrams satisfy end equilibrium with UDL + point",
+      "passed": true,
+      "actual": 1.8189894035458565e-11,
+      "expected": "< 1e-7 N / Nm"
+    },
+    {
+      "name": "Unrestrained rigid-body mechanism rejected",
+      "passed": true,
+      "expected": "rejected",
+      "actual": "rejected"
+    },
+    {
+      "name": "Loaded released zero-stiffness joint rotation rejected",
+      "passed": true,
+      "expected": "rejected",
+      "actual": "rejected"
+    },
+    {
+      "name": "Zero-length element rejected",
+      "passed": true,
+      "expected": "rejected",
+      "actual": "rejected"
+    },
+    {
+      "name": "Dimensionally incompatible user quantity rejected",
+      "passed": true,
+      "expected": "rejected",
+      "actual": "rejected"
+    },
+    {
+      "name": "Unit conversion is SI-consistent",
+      "passed": true,
+      "actual": 200000000000,
+      "expected": 200000000000,
+      "relativeError": 0,
+      "tolerance": 1e-8
+    },
+    {
+      "name": "Persistence round-trip preserves calculations",
+      "passed": true,
+      "actual": -0.0006428571428571424,
+      "expected": -0.0006428571428571424,
+      "relativeError": 0,
+      "tolerance": 1e-8
+    },
+    {
+      "name": "Missing references rejected on import",
+      "passed": true,
+      "expected": "rejected",
+      "actual": "rejected"
+    },
+    {
+      "name": "Massless frame with tip mass: three finite condensed modes",
+      "passed": true,
+      "actual": 9.925054474356275,
+      "expected": 9.925054474356276,
+      "relativeError": 1.7897703674976174e-16,
+      "tolerance": 1e-8
+    },
+    {
+      "name": "Self-weight reaction equals material mass times gravity",
+      "passed": true,
+      "actual": 4618.93215,
+      "expected": 4618.932150000001,
+      "relativeError": 1.969058371582549e-16,
+      "tolerance": 1e-8
+    },
+    {
+      "name": "Zero-mass modal warning preserves valid static results",
+      "passed": true,
+      "actual": -0.0006428571428571424,
+      "expected": -0.0006428571428571427,
+      "relativeError": 5.059610138265689e-16,
+      "tolerance": 1e-8
+    },
+    {
+      "name": "Section roll rotates unequal bending stiffness",
+      "passed": true,
+      "actual": -0.0025714285714285696,
+      "expected": -0.002571428571428571,
+      "relativeError": 5.059610138265689e-16,
+      "tolerance": 1e-8
+    },
+    {
+      "name": "Unsupported diaphragm support conflict rejected",
+      "passed": true,
+      "expected": "rejected",
+      "actual": "rejected"
+    },
+    {
+      "name": "Reserved identifier rejected before object-key assembly",
+      "passed": true,
+      "expected": "rejected",
+      "actual": "rejected"
+    },
+    {
+      "name": "Duplicate reference story elevations rejected",
+      "passed": true,
+      "expected": "rejected",
+      "actual": "rejected"
+    }
+  ]
+}

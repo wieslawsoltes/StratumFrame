@@ -1,0 +1,161 @@
+{
+  "suite": "Stratum Frame browser interaction verification",
+  "timestamp": "2026-09-06T18:42:50.557907+00:00",
+  "browser": "144.0.7559.96",
+  "mode": "inline about:blank",
+  "renderBackend": "Canvas fallback",
+  "webgpuValidated": false,
+  "passed": 29,
+  "total": 29,
+  "checks": [
+    {
+      "name": "Default project solves in an actual browser worker",
+      "passed": true,
+      "details": {
+        "backend": "Canvas fallback",
+        "stats": {
+          "joints": 84,
+          "frames": 174,
+          "physicalDOFs": 504,
+          "activeDOFs": 234,
+          "internalDOFs": 0,
+          "excludedDOFs": 0,
+          "totalMass": 558000,
+          "minPivot": 0.13005405789970792,
+          "profile": 11065,
+          "nonzeros": 3070,
+          "bandwidth": 88,
+          "elapsedMs": 618
+        },
+        "frequencies": [
+          1.7366159576381448,
+          1.8090816017809834,
+          1.9327396383155873,
+          5.470828098843548,
+          5.667658159426248,
+          6.049014298347731
+        ]
+      }
+    },
+    {
+      "name": "Default first frequency agrees with independent Node run",
+      "passed": true
+    },
+    {
+      "name": "Plan pointer hit-testing selects the intended roof beam",
+      "passed": true
+    },
+    {
+      "name": "Section edit changes the model and invalidates results",
+      "passed": true
+    },
+    {
+      "name": "UI undo restores the exact project snapshot",
+      "passed": true
+    },
+    {
+      "name": "UI redo reapplies the edited section",
+      "passed": true
+    },
+    {
+      "name": "Load dialog stores the physical SI value and updates the case",
+      "passed": true
+    },
+    {
+      "name": "Edited load changes recomputed structural displacements",
+      "passed": true,
+      "details": {
+        "maxDisplacementChangeM": 6.474996466700806e-05
+      }
+    },
+    {
+      "name": "Dimensionally invalid assignment is rejected without a transaction",
+      "passed": true
+    },
+    {
+      "name": "Release dialog assigns independent local end components",
+      "passed": true
+    },
+    {
+      "name": "Splitting a loaded member preserves load density on both children",
+      "passed": true
+    },
+    {
+      "name": "Split model preserves original-joint vertical-load displacements",
+      "passed": true,
+      "details": {
+        "maxDifferenceMOrRad": 2.6020852139652106e-18
+      }
+    },
+    {
+      "name": "Display model accepts current computed results",
+      "passed": true
+    },
+    {
+      "name": "Display loads accepts current computed results",
+      "passed": true
+    },
+    {
+      "name": "Display deformed accepts current computed results",
+      "passed": true
+    },
+    {
+      "name": "Display mode accepts current computed results",
+      "passed": true
+    },
+    {
+      "name": "Display axial accepts current computed results",
+      "passed": true
+    },
+    {
+      "name": "Display v2 accepts current computed results",
+      "passed": true
+    },
+    {
+      "name": "Display v3 accepts current computed results",
+      "passed": true
+    },
+    {
+      "name": "Display torsion accepts current computed results",
+      "passed": true
+    },
+    {
+      "name": "Display m2 accepts current computed results",
+      "passed": true
+    },
+    {
+      "name": "Display m3 accepts current computed results",
+      "passed": true
+    },
+    {
+      "name": "Display reactions accepts current computed results",
+      "passed": true
+    },
+    {
+      "name": "Modal animation advances the real modal shape state",
+      "passed": true
+    },
+    {
+      "name": "Display-unit changes leave canonical SI model untouched",
+      "passed": true
+    },
+    {
+      "name": "Project file import validates and restores geometry",
+      "passed": true
+    },
+    {
+      "name": "In-app analytical benchmarks run successfully from the portable bundle",
+      "passed": true
+    },
+    {
+      "name": "Mobile drawing switches to plan with an active-story selector",
+      "passed": true
+    },
+    {
+      "name": "No uncaught JavaScript or console errors during interaction suite",
+      "passed": true,
+      "details": []
+    }
+  ],
+  "errors": []
+}

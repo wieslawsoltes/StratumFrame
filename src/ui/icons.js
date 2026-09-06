@@ -1,0 +1,31 @@
+const paths={
+  cube:'M12 3 3 8v9l9 5 9-5V8l-9-5Zm0 0v10m-9-5 9 5 9-5m-9 5v9',
+  new:'M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6Zm0 0v6h6M12 11v7m-3-3.5h6',
+  open:'M3 7V5a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2v2M3 7h5l2 3h12l-3 10H3L1 7h2Z',
+  save:'M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h12l4 4v12a2 2 0 0 1-2 2ZM7 3v6h9V3M7 21v-8h10v8',
+  undo:'M3 7v6h6M3 13a8 8 0 1 1 2 6',redo:'M21 7v6h-6m6 0a8 8 0 1 0-2 6',
+  select:'m5 3 14 10-7 1-3 7L5 3Z',beam:'m3 18 14-14 4 4L7 22l-4-4Zm0 0 4 4m10-18 4 4',
+  column:'M8 2h8v20H8zM5 2h14M5 22h14M8 6h8M8 18h8',joint:'M12 3v18M3 12h18M8 8h8v8H8z',
+  grid:'M3 3h18v18H3zM3 9h18M3 15h18M9 3v18M15 3v18',story:'m3 7 9-4 9 4-9 4-9-4Zm0 5 9 4 9-4M3 17l9 4 9-4',
+  material:'M12 3 3 8v8l9 5 9-5V8L12 3ZM3 8l9 5 9-5m-9 5v8',section:'M5 3h14v4h-5v10h5v4H5v-4h5V7H5z',
+  support:'M12 4v5m0 0-8 11h16L12 9ZM2 22h20M5 22l-2 2m7-2-2 2m7-2-2 2m7-2-2 2',
+  release:'M2 12h7m6 0h7M9 12a3 3 0 1 0 6 0 3 3 0 1 0-6 0',
+  load:'M4 3v13m-3-3 3 3 3-3M12 3v13m-3-3 3 3 3-3M20 3v13m-3-3 3 3 3-3M2 21h20',
+  play:'m7 4 14 8-14 8V4Z',pause:'M7 4h3v16H7zM14 4h3v16h-3z',stop:'M5 5h14v14H5z',
+  check:'m5 12 4 4L19 6',deform:'M3 20V4h18M3 20C15 20 8 4 21 4',
+  chart:'M3 3v18h18M6 15l5-7 4 4 6-9',mode:'M2 12c3-12 6-12 10 0s7 12 10 0',
+  fit:'M8 3H3v5m13-5h5v5M3 16v5h5m13-5v5h-5M8 8l8 8m0-8-8 8',
+  eye:'M2 12s3-7 10-7 10 7 10 7-3 7-10 7S2 12 2 12Zm7 0a3 3 0 1 0 6 0 3 3 0 1 0-6 0',
+  plus:'M12 5v14M5 12h14',minus:'M5 12h14',chevron:'m9 5 7 7-7 7',down:'m6 9 6 6 6-6',close:'m6 6 12 12M6 18 18 6',
+  search:'M10.5 3a7.5 7.5 0 1 0 0 15 7.5 7.5 0 1 0 0-15ZM16 16l5 5',settings:'M12 8a4 4 0 1 0 0 8 4 4 0 1 0 0-8ZM9 2l-1 4-4 1-2 4 3 3-1 4 4 3 4-2 4 2 4-3-1-4 3-3-2-4-4-1-1-4H9Z',
+  table:'M3 4h18v16H3zM3 9h18M3 14h18M9 4v16M15 4v16',download:'M12 3v12m-5-5 5 5 5-5M4 16v5h16v-5',
+  folder:'M3 5h7l2 3h9v12H3V5Z',info:'M12 2a10 10 0 1 0 0 20 10 10 0 1 0 0-20ZM12 11v6m0-10v1',
+  warning:'m12 3 11 18H1L12 3Zm0 6v5m0 3v1',trash:'M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7m4-7v7',
+  move:'M12 2v20M2 12h20m-13-7 3-3 3 3m-6 14 3 3 3-3M5 9l-3 3 3 3m14-6 3 3-3 3',
+  rotate:'M20 8a8 8 0 1 0 0 8M20 3v5h-5',split:'M3 20 10 13m4-3 7-7M3 4l7 6m4 4 7 6M9 12a3 3 0 1 0 6 0 3 3 0 1 0-6 0',
+  code:'m8 6-6 6 6 6m8-12 6 6-6 6m-2-15-4 18',bolt:'m13 2-9 12h7l-1 8 10-13h-7l1-7Z',
+  lock:'M5 10h14v11H5zM8 10V6a4 4 0 0 1 8 0v4',arrow:'M4 12h16m-6-6 6 6-6 6',layers:'m12 3 10 5-10 5L2 8l10-5Zm-9 10 9 5 9-5M3 18l9 5 9-5',
+  report:'M6 3h12v18H6zM9 7h6M9 11h6M9 15h4',diaphragm:'m3 9 12-5 7 6-12 5-7-6Zm7 6v5m12-10v5M3 9v5l7 6 12-5'
+};
+export function icon(name,size=18){return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="${paths[name]||paths.cube}"/></svg>`;}
+export function hydrateIcons(root=document){root.querySelectorAll('[data-icon]').forEach(e=>e.innerHTML=icon(e.dataset.icon,Number(e.dataset.size)||18));}

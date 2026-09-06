@@ -1,0 +1,1428 @@
+(function(){'use strict';const __modules={"src/app.js":(module,__require)=>{
+const {createBuilding,emptyModel,uniqueId,position,parseProject,validateModel}=__require("src/core/model.js");
+const {quantity,formatValue,displaySystems,unitFactor}=__require("src/core/units.js");
+const {DOFS,localAxes,localToGlobal}=__require("src/core/elements.js");
+const {norm,sub}=__require("src/core/linalg.js");
+const {ProjectStore}=__require("src/ui/store.js");
+const {Viewport}=__require("src/ui/renderer.js");
+const {Dialogs,esc}=__require("src/ui/dialogs.js");
+const {icon,hydrateIcons}=__require("src/ui/icons.js");
+const $=s=>document.querySelector(s);
+const menus={
+  File:[['new','New model','new','Ctrl N'],['open','Open project…','open','Ctrl O'],['save','Save project…','save','Ctrl S'],null,['report','Export analysis report','report'],['csv','Export current table','download'],['json','Model JSON editor','code']],
+  Edit:[['undo','Undo','undo','Ctrl Z'],['redo','Redo','redo','Ctrl Y'],null,['delete','Delete selected objects','trash','Del'],['split','Split selected frames at midpoint','split'],['clear-selection','Clear selection','close','Esc']],
+  View:[['fit','Fit both views','fit','F'],['3d','3D model view','cube'],['elevation','XZ elevation','grid'],['plan','Plan in main view','grid'],null,['view-options','Display settings…','settings']],
+  Define:[['stories','Stories…','story'],['grids','Grid systems…','grid'],['materials','Materials…','material'],['sections','Frame sections…','section'],['rectangle','Rectangular section…','section'],null,['cases','Load cases…','load'],['combinations','Load combinations…','table'],['diaphragms','Rigid diaphragms…','diaphragm']],
+  Draw:[['tool:beam','Draw beam in plan','beam','B'],['tool:column','Draw column in plan','column','C'],['tool:joint','Draw joint in plan','joint','J'],['tool:move','Move joint in plan','move','M'],null,['connect','Connect two selected joints','beam'],['split','Split selected frames','split']],
+  Select:[['select-all','All frames','select','Ctrl A'],['select-beams','Beams','beam'],['select-columns','Columns','column'],['select-story','Active-story joints','joint'],['clear-selection','Clear selection','close']],
+  Assign:[['section-assign','Frame section…','section'],['supports','Joint restraints…','support'],['releases','Frame end releases…','release'],['load','Joint / member loads…','load'],['load-table','View / edit assigned loads…','table'],['diaphragms','Rigid diaphragms…','diaphragm']],
+  Analyze:[['validate','Check model…','check'],['run','Run static + modal analysis','play','F5'],['cancel','Cancel analysis','stop'],['view-options','Analysis settings…','settings']],
+  Display:[['model-view','Undeformed model','cube'],['loads-view','Applied loads','load'],['deformed','Deformed shape','deform'],['forces','Member-force diagrams','chart'],['reactions','Support reactions','support'],['modes','Mode shapes','mode']],
+  Help:[['help','Analysis assumptions & guide','info'],['benchmarks','Run analytical benchmarks','check']]
+};
+function download(name,content,type='application/json') {const blob=new Blob([content],{type}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
+const safeName=s=>String(s).replace(/[^a-z0-9_-]+/gi,'-').replace(/^-|-$/g,'').slice(0,70)||'stratum-model';
+
+class Workbench {
+  constructor(){
+    let restored=null;try{restored=ProjectStore.restore();}catch{}
+    this.store=new ProjectStore(restored||createBuilding());
+    this.state={selection:new Set(),storyZ:Math.max(...this.model.stories.map(s=>s.z)),units:'SI',tool:'select',display:'model',caseId:this.model.combinations[0]?.id||this.model.cases[0]?.id,modeIndex:0,
+      results:null,grids:true,extrude:true,labels:false,joints:false,supports:true,snap:true,animate:false,time:0,deformationScale:0,table:'stories',explorer:'model',drawPreview:null,snapPoint:null};
+    this.dialogs=new Dialogs(this);this.logs=[];this.worker=null;this.workerBlobURL=null;this.runId=0;this.running=false;this.drawStart=null;this.pointers=new Map();
+    this.main=new Viewport($('#main-canvas'),$('#main-overlay'),'3d',m=>this.log(m,'warning'));
+    this.plan=new Viewport($('#plan-canvas'),$('#plan-overlay'),'plan',m=>this.log(m,'warning'));this.views=[this.main,this.plan];
+    this.store.addEventListener('change',e=>{
+      this.cancelAnalysis(false);this.state.results=null;this.state.animate=false;this.drawStart=null;this.state.drawPreview=null;
+      this.state.selection=new Set([...this.state.selection].filter(key=>{const[type,id]=key.split(':');return(type==='n'?this.model.nodes:this.model.elements).some(n=>n.id===id);}));
+      if(!this.model.stories.some(s=>Math.abs(s.z-this.state.storyZ)<1e-7))this.state.storyZ=Math.max(0,...this.model.stories.map(s=>s.z));
+      this.log(e.detail.label);if(e.detail.persistenceError)this.log('Autosave failed: '+e.detail.persistenceError,'warning');
+      this.refresh();this.status(e.detail.label+' · results invalidated');
+    });
+    this.installEvents();this.refresh(true);this.log(restored?'Restored locally saved project.':'Loaded the editable six-story example.');
+    this.log('SI model storage · Float64 sparse frame analysis · consistent mass.');
+    this.tick=this.tick.bind(this);requestAnimationFrame(this.tick);
+  }
+  get model(){return this.store.model;}
+  get units(){return displaySystems[this.state.units];}
+  get result(){return this.state.display==='mode'?this.state.results?.modes[this.state.modeIndex]:this.state.results?.static[this.state.caseId];}
+  get staticResult(){return this.state.results?.static[this.state.caseId];}
+  get displacementUnit(){return this.state.units==='US'?'in':'mm';}
+  fmt(v,dim,digits=3){return formatValue(v,dim,this.state.units,digits);}
+  disp(v,digits=3){return Number.isFinite(v)?(v/unitFactor(this.displacementUnit)).toLocaleString('en-US',{maximumFractionDigits:digits,minimumFractionDigits:digits}):'—';}
+  selectedElements(){return this.model.elements.filter(e=>this.state.selection.has('e:'+e.id));}
+  selectedNodes(){return this.model.nodes.filter(e=>this.state.selection.has('n:'+e.id));}
+  log(message,level='info'){
+    this.logs.push({time:new Date().toLocaleTimeString('en-GB'),message,level});if(this.logs.length>250)this.logs.shift();
+    $('#log-count').textContent=this.logs.length;if(this.state.table==='diagnostics')this.renderTable();
+  }
+  status(message){$('#status-message').innerHTML='<span class="live-dot"></span>'+esc(message);}
+  toast(message,error=false){const t=$('#toast');t.textContent=message;t.classList.remove('hidden');t.classList.toggle('error',error);clearTimeout(this.toastTimer);this.toastTimer=setTimeout(()=>t.classList.add('hidden'),error?6500:3500);}
+  guard(fn){try{return fn();}catch(e){this.toast(e.message,true);this.log(e.message,'error');return null;}}
+  async init(){const backends=await Promise.all(this.views.map(v=>v.init()));$('#gpu-status').innerHTML=icon('bolt',12)+' '+(backends.every(b=>b==='WebGPU')?'WebGPU · instanced':'Canvas fallback');this.refresh(true);this.runAnalysis();}
+  refresh(fit=false){
+    const s=this.state,m=this.model;if(!m.cases.some(c=>c.id===s.caseId)&&!m.combinations.some(c=>c.id===s.caseId))s.caseId=m.combinations[0]?.id||m.cases[0]?.id;
+    $('#document-name').textContent=m.name;document.title=m.name+' — Stratum Frame';
+    $('#case-select').innerHTML=[['Load cases',m.cases],['Combinations',m.combinations]].map(([label,items])=>`<optgroup label="${label}">${items.map(c=>`<option value="${esc(c.id)}" ${c.id===s.caseId?'selected':''}>${esc(c.id)} · ${esc(c.name)}</option>`).join('')}</optgroup>`).join('');
+    const storyOptions=[...m.stories].sort((a,b)=>b.z-a.z).map(st=>`<option value="${st.z}" ${Math.abs(st.z-s.storyZ)<1e-7?'selected':''}>${esc(st.name)}</option>`).join('');
+    $('#story-select').innerHTML=storyOptions;$('#main-story-select').innerHTML=storyOptions;$('#main-story-select').classList.toggle('hidden',this.main.kind!=='plan');
+    $('#display-select').value=s.display;$('#unit-select').value=s.units;
+    const st=m.stories.find(t=>Math.abs(t.z-s.storyZ)<1e-7);$('#plan-info').textContent=(st?.name||'Level')+' · '+this.fmt(s.storyZ,'length')+' '+this.units.length;
+    $('#mode-select').innerHTML=(s.results?.modes||[]).map((mode,i)=>`<option value="${i}" ${s.modeIndex===i?'selected':''}>${i+1} · ${mode.frequency.toFixed(3)} Hz</option>`).join('');$('.mode-control').classList.toggle('hidden',s.display!=='mode');
+    $('#model-counts').textContent=`${m.nodes.length} joints · ${m.elements.length} frames`;
+    $('#dof-status').textContent=s.results?`${s.results.stats.activeDOFs} active DOF · Float64`:`${m.nodes.length*6} physical DOF · Float64`;
+    $('#selection-count').textContent=s.selection.size+' selected';$('#snap-toggle').textContent=s.snap?'Grid snap on':'Grid snap off';
+    $('#analysis-state').classList.toggle('pending',!s.results);$('#analysis-state').classList.toggle('progress-pulse',this.running);
+    $('#analysis-state').innerHTML='<span class="live-dot"></span>'+(this.running?'Analyzing…':s.results?s.results.modalError?'Static solved · modal warning':'Analysis current':'Model modified · run analysis');
+    document.querySelectorAll('[data-toggle]').forEach(b=>b.classList.toggle('toggled',!!s[b.dataset.toggle]));document.querySelectorAll('[data-tool]').forEach(b=>b.classList.toggle('active',s.tool===b.dataset.tool));
+    document.querySelectorAll('[data-explorer]').forEach(b=>b.classList.toggle('selected',s.explorer===b.dataset.explorer));document.querySelectorAll('[data-table]').forEach(b=>b.classList.toggle('active',s.table===b.dataset.table));
+    document.querySelectorAll('[data-action="undo"]').forEach(b=>b.disabled=!this.store.past.length);document.querySelectorAll('[data-action="redo"]').forEach(b=>b.disabled=!this.store.future.length);
+    const mode=this.result;let chip='Section assignments';if(s.display==='loads')chip=s.caseId+' · Applied loads (excluding self-weight arrows)';else if(s.display==='mode'&&mode)chip=`Mode ${s.modeIndex+1} · ${mode.frequency.toFixed(3)} Hz · ${mode.period.toFixed(3)} s`;else if(s.display==='deformed'&&mode)chip=`${s.caseId} · Max |u| ${this.disp(mode.maxDisplacement)} ${this.displacementUnit}`;else if(s.display!=='model')chip=s.caseId+' · '+$('#display-select').selectedOptions[0]?.textContent;
+    $('#result-chip').innerHTML='<span class="chip-dot"></span>'+esc(chip);
+    $('#main-legend').innerHTML=['deformed','mode'].includes(s.display)?'<span><i style="background:#8060d2"></i>Computed deformation</span><span><i style="background:#c4cdd8"></i>Undeformed</span>':s.display==='model'?'<span><i class="column-color"></i>Columns</span><span><i class="beam-color"></i>Beams</span><span><i class="support-color"></i>Restraints</span>':['axial','v2','v3','torsion','m2','m3'].includes(s.display)?'<span><i style="background:#14969e"></i>Positive</span><span><i style="background:#d65766"></i>Negative</span>':'';
+    $('#main-hint').textContent=s.tool==='select'?'Drag to orbit · scroll to zoom · Shift-drag to box select':s.tool==='beam'?(this.drawStart?'Click the second endpoint in Plan View':'Click the first endpoint in Plan View'):s.tool==='column'?'Click a plan point to connect this story to the one below':s.tool==='joint'?'Click in Plan View to add a joint':'Drag a joint in Plan View; coordinates snap to the grid';
+    for(const v of this.views){v.setState(m,s);if(fit)v.fit();}
+    $('#main-view-title').textContent=this.main.kind==='3d'?'3D View':this.main.kind==='plan'?'Plan View':'XZ Elevation';
+    $('#animate-button').innerHTML=icon(s.animate?'pause':'play');$('#animate-button').classList.toggle('toggled',s.animate);
+    this.renderTree();this.renderInspector();this.renderTable();
+  }
+  renderTree(){
+    const m=this.model,s=this.state,q=$('#tree-search').value.toLowerCase(),rows=[];
+    rows.push(`<div class="tree-header">${icon('down',10)}${icon('folder',15)}<span>${esc(m.name.split(' · ')[0])}</span></div>`);
+    const row=(id,name,type,count='',active=false)=>`<button class="tree-row ${active?'active':''}" data-${type}="${esc(id)}">${icon(type==='story'?'story':type==='case'?'load':'beam',14)}<span>${esc(name)}</span>${count!==''?`<small>${esc(count)}</small>`:''}</button>`;
+    if(q){
+      for(const n of m.nodes)if(n.id.toLowerCase().includes(q))rows.push(row('n:'+n.id,n.id,'object',`${this.fmt(n.z,'length')} ${this.units.length}`,s.selection.has('n:'+n.id)));
+      for(const e of m.elements)if((e.id+' '+e.section).toLowerCase().includes(q))rows.push(row('e:'+e.id,e.id,'object',e.section,s.selection.has('e:'+e.id)));
+    }else if(s.explorer==='model'){
+      rows.push('<div class="tree-group"><div class="tree-group-label">STORIES & FRAMING<span>'+m.stories.length+' LEVELS</span></div>');
+      for(const st of [...m.stories].sort((a,b)=>b.z-a.z))rows.push(row(st.z,st.name,'story',this.fmt(st.z,'length')+' '+this.units.length,Math.abs(st.z-s.storyZ)<1e-7));
+      rows.push('</div><div class="tree-group"><div class="tree-group-label">DEFINITIONS</div>');
+      for(const[action,label,ic,count]of[['grids','Grid systems','grid',m.grids.x.length+' × '+m.grids.y.length],['materials','Materials','material',m.materials.length],['sections','Frame sections','section',m.sections.length],['diaphragms','Diaphragms','diaphragm',m.diaphragms.length],['cases','Load cases','load',m.cases.length],['combinations','Load combinations','table',m.combinations.length]])rows.push(`<button class="tree-row definition" data-action="${action}">${icon(ic,14)}<span>${label}</span><small class="count">${count}</small></button>`);
+      rows.push('</div>');
+      if(s.selection.size)rows.push(`<div class="tree-group-label" style="margin-top:13px">SELECTION · ${s.selection.size}</div>`,...[...s.selection].slice(0,20).map(k=>row(k,k.slice(2),'object','',true)));
+    }else if(s.explorer==='loads'){
+      rows.push('<div class="tree-group-label">STATIC LOAD CASES</div>');for(const c of m.cases)rows.push(row(c.id,c.name,'case',m.loads.filter(l=>l.case===c.id).length,s.caseId===c.id));
+      rows.push('<div class="tree-group-label">LINEAR COMBINATIONS</div>');for(const c of m.combinations)rows.push(row(c.id,c.name,'case','',s.caseId===c.id));
+      rows.push(`<button class="tree-row definition" data-action="load-table">${icon('table',14)}Assigned loads table</button>`);
+    }else{
+      rows.push('<div class="tree-group-label">STATIC RESULTS</div>');for(const c of [...m.cases,...m.combinations])rows.push(row(c.id,c.id,'resultcase',s.results?'Solved':'Not run',s.caseId===c.id));
+      rows.push('<div class="tree-group-label">MODAL RESULTS</div>');for(const mode of s.results?.modes||[])rows.push(`<button class="tree-row" data-mode="${mode.number-1}">${icon('mode',14)}<span>Mode ${mode.number}</span><small>${mode.frequency.toFixed(3)} Hz</small></button>`);
+    }
+    $('#model-tree').innerHTML=rows.join('');
+  }
+  propertyRow(label,value){return `<div class="property-row"><label>${label}</label><span>${value}</span></div>`;}
+  propertyInput(label,key,value,kind='node',extra=''){return `<div class="property-row"><label>${label}</label><input data-property="${key}" data-kind="${kind}" value="${esc(value)}" ${extra}></div>`;}
+  inspectorHTML(){
+    const s=this.state,m=this.model,r=this.staticResult,es=this.selectedElements(),ns=this.selectedNodes();
+    let html='';
+    const head=(ic,name,sub)=>`<div class="property-title"><div class="property-symbol">${icon(ic,20)}</div><div><strong>${esc(name)}</strong><small>${esc(sub)}</small></div></div>`;
+    if(es.length===1&&!ns.length){
+      const e=es[0],sec=m.sections.find(sec=>sec.id===e.section),mat=m.materials.find(mat=>mat.id===sec.material),a=m.nodes.find(n=>n.id===e.i),b=m.nodes.find(n=>n.id===e.j),L=norm(sub(position(a),position(b)));
+      html+=head('beam',e.id+' · Frame object',Math.abs(a.z-b.z)>1e-6?'Column / inclined frame':'Beam / horizontal frame');
+      html+=`<div class="property-section"><h3>GEOMETRY & SECTION</h3>${this.propertyRow('End I',esc(e.i))}${this.propertyRow('End J',esc(e.j))}${this.propertyRow('Length',this.fmt(L,'length')+' '+this.units.length)}<div class="property-row"><label>Section</label><select data-property="section" data-kind="element">${m.sections.map(sec=>`<option value="${esc(sec.id)}" ${e.section===sec.id?'selected':''}>${esc(sec.name)}</option>`).join('')}</select></div>${this.propertyRow('Material',esc(String(mat.name||mat.id).split(' · ')[0]))}${this.propertyInput('Local-axis roll (deg)','roll',((e.roll||0)*180/Math.PI).toFixed(2),'element')}<div class="mini-section"><div class="section-rectangle" style="width:${Math.max(10,45*(sec.b||.3)/(sec.h||.6))}px;height:50px"></div></div>${this.propertyRow('Area',this.fmt(sec.A,'area',6)+' '+this.units.area)}<button class="inspector-button" data-action="releases">${icon('release',14)} End releases (${e.releases?.filter(Boolean).length||0})</button><button class="inspector-button" data-action="load">${icon('load',14)} Assign member loads</button></div>`;
+      if(r){const data=r.members[e.id];html+=`<div class="property-section"><h3>END I FORCES · ${esc(s.caseId)}</h3>${['P','V2','V3','T','M2','M3'].map((name,i)=>this.propertyRow(name,this.fmt(data.endForces[i],i<3?'force':'moment')+' '+this.units[i<3?'force':'moment'])).join('')}<p class="property-description">Local element resisting forces, before cut-face sign conversion.</p>${this.memberChart(data)}</div>`;}
+      html+=`<div class="property-section"><h3>OBJECT ACTIONS</h3><button class="inspector-button" data-action="split">${icon('split',13)}Split at midpoint</button><button class="inspector-button" data-action="delete">${icon('trash',13)}Delete frame</button></div>`;
+    }else if(ns.length===1&&!es.length){
+      const n=ns[0],index=m.nodes.indexOf(n);html+=head('joint',n.id+' · Joint object','Global coordinates');
+      html+=`<div class="property-section"><h3>COORDINATES</h3>${['x','y','z'].map(k=>this.propertyInput(k.toUpperCase()+' ('+this.units.length+')',k,n[k]/unitFactor(this.units.length))).join('')}${this.propertyInput('Added mass ('+this.units.mass+')','mass',(n.mass||0)/unitFactor(this.units.mass))}<p class="property-description">Added mass acts in X, Y and Z. It does not add a gravity load.</p></div>`;
+      html+=`<div class="property-section"><h3>JOINT RESTRAINTS</h3><div class="support-flags">${DOFS.map((d,k)=>`<label><input type="checkbox" data-property="support:${k}" data-kind="node" ${n.support[k]?'checked':''}>${d}</label>`).join('')}</div><button class="inspector-button" data-action="load">${icon('load',13)}Assign joint load</button></div>`;
+      const d=m.diaphragms.find(d=>d.nodes.includes(n.id));html+=`<div class="property-section"><h3>ASSIGNMENTS</h3>${this.propertyRow('Diaphragm',esc(d?.name||'None'))}${this.propertyRow('Attached frames',m.elements.filter(e=>e.i===n.id||e.j===n.id).length)}</div>`;
+      if(r)html+=`<div class="property-section"><h3>DISPLACEMENTS · ${esc(s.caseId)}</h3>${DOFS.map((d,k)=>this.propertyRow(d,k<3?this.disp(r.u[index*6+k])+' '+this.displacementUnit:r.u[index*6+k].toExponential(3)+' rad')).join('')}</div>`;
+    }else if(s.selection.size){
+      html+=head('select',s.selection.size+' objects selected',`${ns.length} joints · ${es.length} frames`)+`<div class="property-section"><h3>MULTI-OBJECT ASSIGNMENTS</h3><button class="inspector-button" data-action="section-assign">${icon('section',14)}Assign frame section</button><button class="inspector-button" data-action="supports">${icon('support',14)}Assign joint restraints</button><button class="inspector-button" data-action="load">${icon('load',14)}Assign loads</button><button class="inspector-button" data-action="releases">${icon('release',14)}Assign end releases</button><button class="inspector-button" data-action="connect">${icon('beam',14)}Connect two selected joints</button><button class="inspector-button" data-action="delete">${icon('trash',14)}Delete selection</button></div>`;
+    }else{
+      html+=head('cube','Model overview','Linear elastic · 3D frame');
+      html+=`<div class="property-section"><h3>STRUCTURE</h3>${this.propertyRow('Stories',Math.max(0,m.stories.length-1))}${this.propertyRow('Frame objects',m.elements.length)}${this.propertyRow('Joints',m.nodes.length)}${this.propertyRow('Restraints',m.nodes.filter(n=>n.support.some(Boolean)).length+' joints')}${this.propertyRow('Diaphragms',m.diaphragms.length+' rigid')}<div class="property-tags"><span class="property-tag">SI STORAGE</span><span class="property-tag">6 DOF / JOINT</span><span class="property-tag">FLOAT64</span></div></div>`;
+      html+=`<div class="property-section"><h3>ANALYSIS SUMMARY</h3><div class="metric-grid"><div class="metric-card"><label>MAX. SAMPLED |u|</label><strong>${r?this.disp(r.maxDisplacement,2):'—'}</strong><small>${this.displacementUnit}</small></div><div class="metric-card"><label>FUNDAMENTAL MODE</label><strong>${s.results?.modes[0]?.frequency.toFixed(2)||'—'}</strong><small>Hz</small></div></div>${this.propertyRow('Active case',esc(s.caseId||'None'))}${s.results?this.propertyRow('Active unknowns',s.results.stats.activeDOFs)+this.propertyRow('Assembled K nonzeros',s.results.stats.nonzeros?.toLocaleString()||'0')+this.propertyRow('Solver time',s.results.stats.elapsedMs.toFixed(1)+' ms'):''}<p class="property-description">Values are computed from the current model. Edit any analysis input to invalidate this snapshot.</p></div>`;
+      html+=`<div class="property-section"><h3>ANALYSIS SETTINGS</h3>${this.propertyRow('Static solver','Skyline LDLᵀ')}${this.propertyRow('Element mass','Consistent')}${this.propertyRow('Geometric behavior','First order')}${this.propertyInput('Number of modes','modes',m.settings.modes,'settings','type="number" min="1" max="24"')}<div class="property-row"><label>Include modal analysis</label><input type="checkbox" data-property="modal" data-kind="settings" ${m.settings.modal?'checked':''}></div><button class="inspector-button" data-action="view-options">${icon('settings',13)}Analysis & display settings</button></div>`;
+    }
+    html+='<div class="analysis-note"><b>Frame model, not a slab model.</b><br>Rigid diaphragms provide in-plane compatibility only. No gravity floor stiffness or floor mass is generated automatically.<br><button data-action="help" style="padding:4px 0;font-size:8px;color:#728aaf">Read analysis assumptions →</button></div>';return html;
+  }
+  renderInspector(){$('#inspector-content').innerHTML=this.inspectorHTML();}
+  memberChart(data){const index={axial:0,v2:1,v3:2,torsion:3,m2:4,m3:5}[this.state.display]??4,pts=[];let max=1;for(let i=index+1;i<data.diagram.length;i+=7)max=Math.max(max,Math.abs(data.diagram[i]));for(let i=0;i<data.diagram.length/7;i++)pts.push(`${12+data.diagram[i*7]*188},${37-data.diagram[i*7+index+1]/max*26}`);return `<svg class="mini-chart" viewBox="0 0 212 75" aria-label="Computed ${['P','V2','V3','T','M2','M3'][index]} diagram"><path d="M12 37H200" stroke="#d8e1ee" stroke-width="1"/><polyline points="${pts.join(' ')}" fill="none" stroke="#578fbb" stroke-width="1.4"/><text x="12" y="70" font-family="system-ui" font-size="8" fill="#96a5b9">${['P','V2','V3','T','M2','M3'][index]} · local cut-face resultants</text></svg>`;}
+  tableData(){
+    const m=this.model,s=this.state,r=this.staticResult,u=this.units,du=this.displacementUnit;const rows=[];let headers=[];
+    if(s.table==='modes'){
+      headers=['Mode','Frequency (Hz)','Period (s)','UX mass (%)','UY mass (%)','UZ mass (%)','Residual'];
+      for(const mode of s.results?.modes||[])rows.push({key:'mode:'+String(mode.number-1),values:[mode.number,mode.frequency.toFixed(5),mode.period.toFixed(5),...mode.participation.map(p=>(p*100).toFixed(3)),mode.residual.toExponential(2)]});return{headers,rows};
+    }
+    if(!r)return{headers,rows};
+    if(s.table==='stories'){
+      headers=['Story',`Elevation (${u.length})`,`Max |UX| (${du})`,`Max |UY| (${du})`,`Max |UZ| (${du})`,'Max drift X (%)','Max drift Y (%)'];
+      const stories=[...m.stories].sort((a,b)=>a.z-b.z);
+      for(let si=stories.length-1;si>=0;si--){const st=stories[si],ids=m.nodes.map((n,i)=>({n,i})).filter(({n})=>Math.abs(n.z-st.z)<1e-6),max=[0,0,0],drift=[0,0];
+        for(const {n,i}of ids){for(let k=0;k<3;k++)max[k]=Math.max(max[k],Math.abs(r.u[i*6+k]));if(si>0){const below=m.nodes.findIndex(b=>Math.abs(b.z-stories[si-1].z)<1e-6&&Math.abs(b.x-n.x)<1e-6&&Math.abs(b.y-n.y)<1e-6);if(below>=0)for(let k=0;k<2;k++)drift[k]=Math.max(drift[k],Math.abs(r.u[i*6+k]-r.u[below*6+k])/(st.z-stories[si-1].z));}}
+        rows.push({key:'story:'+st.z,values:[st.name,this.fmt(st.z,'length'),...max.map(v=>this.disp(v)),...drift.map(v=>(v*100).toFixed(4))]});}
+    }else if(s.table==='joints'){
+      headers=['Joint',...DOFS.map((d,k)=>d+' ('+(k<3?du:'rad')+')')];m.nodes.forEach((n,i)=>rows.push({key:'n:'+n.id,values:[n.id,...DOFS.map((_,k)=>k<3?this.disp(r.u[i*6+k]):r.u[i*6+k].toExponential(4))]}));
+    }else if(s.table==='reactions'){
+      headers=['Joint',...['FX','FY','FZ','MX','MY','MZ'].map((d,k)=>d+' ('+(k<3?u.force:u.moment)+')')];m.nodes.forEach((n,i)=>{if(n.support.some(Boolean))rows.push({key:'n:'+n.id,values:[n.id,...DOFS.map((_,k)=>this.fmt(r.reactions[i*6+k],k<3?'force':'moment'))]});});
+    }else if(s.table==='members'){
+      headers=['Frame','Section',`Pᵢ (${u.force})`,`V2ᵢ (${u.force})`,`V3ᵢ (${u.force})`,`Tᵢ (${u.moment})`,`M2ᵢ (${u.moment})`,`M3ᵢ (${u.moment})`];for(const e of m.elements){const d=r.members[e.id];rows.push({key:'e:'+e.id,values:[e.id,e.section,...Array.from(d.endForces.slice(0,6),(v,k)=>this.fmt(v,k<3?'force':'moment'))]});}
+    }
+    return {headers,rows};
+  }
+  renderTable(){
+    if(this.state.table==='diagnostics'){$('#result-table').innerHTML=this.logs.map(l=>`<div class="log-entry ${l.level}"><time>${l.time}</time><span class="log-label">${l.level.toUpperCase()}</span><span>${esc(l.message)}</span></div>`).join('');return;}
+    const {headers,rows}=this.tableData();if(!rows.length){$('#result-table').innerHTML=`<div class="table-empty">${icon(this.running?'settings':'chart',24)}<span>${this.running?'Solving the current structural model…':this.state.results?.modalError&&this.state.table==='modes'?esc(this.state.results.modalError):'Run analysis to compute results for this model.'}</span></div>`;return;}
+    $('#result-table').innerHTML=`<table class="data-table"><thead><tr>${headers.map(h=>`<th>${esc(h)}</th>`).join('')}</tr></thead><tbody>${rows.map(row=>`<tr data-result-row="${esc(row.key)}" class="${this.state.selection.has(row.key)?'selected':''}">${row.values.map((v,i)=>`<td ${i===0?'class="table-accent"':''}>${esc(v)}</td>`).join('')}</tr>`).join('')}</tbody></table>`;
+  }
+  select(key,additive=false){if(!additive)this.state.selection.clear();if(key){if(additive&&this.state.selection.has(key))this.state.selection.delete(key);else this.state.selection.add(key);}this.refresh();}
+  setTool(tool){this.state.tool=tool;this.drawStart=null;this.state.drawPreview=null;this.state.snapPoint=null;if(tool!=='select'&&window.innerWidth<590){this.main.kind='plan';this.main.camera.center[2]=this.state.storyZ;this.main.fit();}this.refresh();}
+  setDisplay(display){
+    if(!['model','loads'].includes(display)&&!this.state.results){this.toast('Run analysis first; results are invalidated by model changes.');$('#display-select').value=this.state.display;return;}
+    if(display==='mode'&&!this.state.results?.modes.length){this.toast(this.state.results?.modalError||'No converged modes are available.',true);return;}
+    this.state.display=display;this.state.animate=false;if(display==='mode')this.state.table='modes';if(['m2','m3','v2','v3','axial','torsion'].includes(display))this.state.table='members';if(display==='reactions'){this.state.table='reactions';this.state.storyZ=Math.min(...this.model.stories.map(st=>st.z));}this.refresh();
+  }
+  action(action){
+    if(action.startsWith('tool:')){this.setTool(action.slice(5));return;}
+    const direct={new:'newModel',materials:'materials',sections:'sections',rectangle:'rectangle',stories:'stories',grids:'grids',cases:'cases',combinations:'combinations',diaphragms:'diaphragms',supports:'supports',releases:'releases',load:'load','load-table':'loadTable',json:'json','view-options':'viewOptions',validate:'validate',help:'help',benchmarks:'benchmarks'};
+    if(direct[action]){this.dialogs[direct[action]]();return;}
+    switch(action){
+      case'open':$('#file-input').click();break;
+      case'save':download(safeName(this.model.name)+'.stratum.json',JSON.stringify(this.model,null,2));this.toast('Project exported with canonical SI units.');break;
+      case'undo':this.store.undo();break;case'redo':this.store.redo();break;
+      case'run':if(this.running)this.cancelAnalysis();else this.runAnalysis();break;case'cancel':this.cancelAnalysis();break;
+      case'fit':this.views.forEach(v=>v.fit());break;case'fit-main':this.main.fit();break;case'fit-plan':this.plan.fit();break;
+      case'3d':case'elevation':case'plan':this.main.kind=action;this.main.fit();this.refresh();break;
+      case'model-view':this.setDisplay('model');break;case'deformed':this.setDisplay('deformed');break;case'forces':this.setDisplay('m2');break;case'modes':this.setDisplay('mode');break;case'reactions':this.setDisplay('reactions');break;case'loads-view':this.setDisplay('loads');break;
+      case'animate':if(!['deformed','mode'].includes(this.state.display)){this.toast('Choose a deformed shape or mode before animating.');break;}this.state.animate=!this.state.animate;this.refresh();break;
+      case'clear-selection':this.select(null);break;
+      case'select-all':this.state.selection=new Set(this.model.elements.map(e=>'e:'+e.id));this.refresh();break;
+      case'select-beams':case'select-columns':{const nodes=new Map(this.model.nodes.map(n=>[n.id,n]));this.state.selection=new Set(this.model.elements.filter(e=>(Math.abs(nodes.get(e.i).z-nodes.get(e.j).z)>1e-6)===(action==='select-columns')).map(e=>'e:'+e.id));this.refresh();break;}
+      case'select-story':this.state.selection=new Set(this.model.nodes.filter(n=>Math.abs(n.z-this.state.storyZ)<1e-6).map(n=>'n:'+n.id));this.refresh();break;
+      case'delete':this.deleteSelection();break;case'split':this.splitFrames();break;case'connect':this.connectSelection();break;case'section-assign':this.assignSection();break;
+      case'csv':this.exportCSV();break;case'report':this.exportReport();break;case'inspect':this.dialogs.open('Object properties',this.inspectorHTML(),null,{note:'Property edits apply immediately and are undoable.'});break;
+      default:this.toast('Unknown command: '+action,true);
+    }
+  }
+  runAnalysis(){
+    if(!this.model.elements.length){this.toast('Add frame elements before analysis.',true);return;}
+    this.cancelAnalysis(false);const id=++this.runId,revision=this.store.revision;this.running=true;this.state.results=null;this.state.animate=false;
+    this.log(`Analysis started: ${this.model.nodes.length} joints, ${this.model.elements.length} frames, revision ${revision}.`);
+    try{
+      if(globalThis.STRATUM_WORKER_SOURCE){this.workerBlobURL=URL.createObjectURL(new Blob([globalThis.STRATUM_WORKER_SOURCE],{type:'text/javascript'}));this.worker=new Worker(this.workerBlobURL);}else this.worker=new Worker(new URL('./analysis-worker.js',document.baseURI),{type:'module'});
+    }catch(e){this.cancelAnalysis(false);this.log(e.message,'error');this.toast('Worker initialization failed. Serve the application over localhost or HTTPS.',true);this.refresh();return;}
+    $('#run-button').innerHTML=icon('stop',19)+'<span>Cancel analysis<small>WORKER IS RUNNING</small></span>';
+    this.worker.onmessage=event=>{
+      const data=event.data;if(data.id!==id||revision!==this.store.revision)return;
+      if(data.type==='progress'){this.status(data.progress.stage);if(!data.progress.iteration)this.log(data.progress.stage);return;}
+      this.running=false;this.worker?.terminate();this.worker=null;if(this.workerBlobURL){URL.revokeObjectURL(this.workerBlobURL);this.workerBlobURL=null;}
+      $('#run-button').innerHTML=icon('play',20)+'<span>Run analysis<small>LINEAR STATIC + MODAL</small></span>';
+      if(data.type==='error'){this.state.results=null;this.state.table='diagnostics';this.log(data.error.message,'error');this.toast(data.error.message,true);this.status('Analysis failed · inspect diagnostics');}
+      else{
+        this.state.results=data.result;this.state.modeIndex=Math.min(this.state.modeIndex,Math.max(0,data.result.modes.length-1));
+        const result=data.result,stats=result.stats;this.log(`Solved ${Object.keys(result.static).length} static cases/combinations and ${result.modes.length} modes in ${stats.elapsedMs.toFixed(1)} ms. ${stats.activeDOFs} active DOFs, ${stats.nonzeros||0} K coefficients, minimum scaled pivot ${stats.minPivot?.toExponential(3)||'n/a'}.`);
+        for(const warning of result.warnings)this.log(warning,'warning');
+        const maxResidual=Math.max(0,...Object.values(result.static).map(r=>r.residual));this.log(`Maximum static relative residual: ${maxResidual.toExponential(3)}. Results are tied to model revision ${revision}.`);
+        this.status(result.modalError?'Static solved · modal analysis needs review':'Analysis complete · equilibrium checked');
+      }
+      this.refresh();
+    };
+    this.worker.onerror=event=>{this.log('Worker error: '+event.message,'error');this.toast('Analysis worker failed: '+event.message,true);this.cancelAnalysis(false);this.state.table='diagnostics';this.refresh();};
+    this.worker.postMessage({id,model:structuredClone(this.model),options:{modal:this.model.settings.modal,modes:this.model.settings.modes}});this.refresh();
+  }
+  cancelAnalysis(notify=true){if(this.worker){this.worker.terminate();this.worker=null;this.runId++;if(notify){this.log('Analysis cancelled; no partial results accepted.','warning');this.status('Analysis cancelled');}}if(this.workerBlobURL){URL.revokeObjectURL(this.workerBlobURL);this.workerBlobURL=null;}this.running=false;$('#run-button').innerHTML=icon('play',20)+'<span>Run analysis<small>LINEAR STATIC + MODAL</small></span>';if(notify)this.refresh();}
+  assignSection(){const es=this.selectedElements();this.dialogs.open('Assign frame section',`<p>${es.length} frames selected. Existing element orientation and release assignments are preserved.</p><div class="dialog-grid"><label class="full">Frame IDs<input id="assign-targets" value="${esc(es.map(e=>e.id).join(', '))}" placeholder="F1, F2"></label><label class="full">Section<select id="assign-section">${this.model.sections.map(s=>`<option value="${esc(s.id)}">${esc(s.name)}</option>`).join('')}</select></label></div>`,()=>{const ids=this.dialogs.val('assign-targets').split(',').map(s=>s.trim()).filter(Boolean);if(!ids.length)throw new Error('Select or enter frame IDs.');this.store.transact('Assign section',m=>{for(const id of ids){const e=m.elements.find(e=>e.id===id);if(!e)throw new Error('Unknown frame '+id);e.section=this.dialogs.val('assign-section');}});});}
+  deleteSelection(){
+    if(!this.state.selection.size){this.toast('Select joints or frames to delete.');return;}
+    const nodeIds=new Set(this.selectedNodes().map(n=>n.id)),frameIds=new Set(this.selectedElements().map(e=>e.id));
+    this.store.transact('Delete selection',m=>{
+      for(const e of m.elements)if(nodeIds.has(e.i)||nodeIds.has(e.j))frameIds.add(e.id);
+      m.nodes=m.nodes.filter(n=>!nodeIds.has(n.id));m.elements=m.elements.filter(e=>!frameIds.has(e.id));m.loads=m.loads.filter(l=>!nodeIds.has(l.node)&&!frameIds.has(l.element));
+      for(const d of m.diaphragms)d.nodes=d.nodes.filter(id=>!nodeIds.has(id));m.diaphragms=m.diaphragms.filter(d=>d.nodes.length>=2);
+    });
+  }
+  getOrCreateNode(m,p){let n=m.nodes.find(n=>norm(sub(position(n),p))<1e-7);if(!n){n={id:uniqueId(m,'nodes','J'),x:p[0],y:p[1],z:p[2],support:Array(6).fill(false),mass:0};m.nodes.push(n);}return n;}
+  addFrame(m,i,j,section){if(i===j)throw new Error('Choose two distinct endpoints.');if(m.elements.some(e=>(e.i===i&&e.j===j)||(e.i===j&&e.j===i)))throw new Error('A frame already connects those joints.');const e={id:uniqueId(m,'elements','F'),i,j,section,roll:0,releases:Array(12).fill(false)};m.elements.push(e);return e;}
+  connectSelection(){const ns=this.selectedNodes();if(ns.length!==2)throw new Error('Select exactly two joints to connect.');let id;this.store.transact('Connect selected joints',m=>id=this.addFrame(m,ns[0].id,ns[1].id,m.sections.find(s=>s.id==='B300')?.id||m.sections[0].id).id);this.select('e:'+id);}
+  splitFrames(){
+    const ids=this.selectedElements().map(e=>e.id);if(!ids.length)throw new Error('Select at least one frame to split.');const selected=[];
+    this.store.transact('Split selected frames',m=>{
+      for(const id of ids){const e=m.elements.find(e=>e.id===id),a=m.nodes.find(n=>n.id===e.i),b=m.nodes.find(n=>n.id===e.j),p=position(a).map((v,k)=>(v+position(b)[k])/2),mid=this.getOrCreateNode(m,p);
+        const children=[];for(const[i,j,end]of[[e.i,mid.id,0],[mid.id,e.j,1]]){const child=this.addFrame(m,i,j,e.section);child.roll=e.roll;child.releases=Array(12).fill(false);for(let k=0;k<6;k++)child.releases[end*6+k]=e.releases?.[end*6+k]||false;children.push(child);selected.push('e:'+child.id);}
+        for(const d of m.diaphragms)if(d.nodes.includes(e.i)&&d.nodes.includes(e.j)&&!d.nodes.includes(mid.id))d.nodes.push(mid.id);
+        const loads=m.loads.filter(l=>l.element===id);m.loads=m.loads.filter(l=>l.element!==id);
+        for(const load of loads){if(load.type==='udl'){for(const child of children)m.loads.push({...structuredClone(load),id:uniqueId(m,'loads','L'),element:child.id});}
+          else if(Math.abs(load.position-.5)<1e-9){const v=load.system==='global'?load.value:localToGlobal(localAxes(position(a),position(b),e.roll).R,load.value);m.loads.push({id:uniqueId(m,'loads','L'),case:load.case,type:'nodal',node:mid.id,value:[...v,0,0,0]});}
+          else{const end=load.position<.5?0:1;m.loads.push({...load,id:uniqueId(m,'loads','L'),element:children[end].id,position:end?(load.position-.5)*2:load.position*2});}}
+        m.elements=m.elements.filter(x=>x.id!==id);
+      }
+    });this.state.selection=new Set(selected);this.refresh();
+  }
+  snap(view,x,y){
+    let p=view.worldAt(x,y,this.state.storyZ);if(!p)return null;p[2]=this.state.storyZ;
+    if(this.state.snap){let best=null,dist=12;for(const n of this.model.nodes)if(Math.abs(n.z-p[2])<1e-7){const sp=view.project(position(n)),d=Math.hypot(x-sp.x,y-sp.y);if(d<dist){dist=d;best=n;}}if(best)return position(best);
+      const threshold=view.camera.span/view.height*12;
+      for(const [k,axis]of[[0,'x'],[1,'y']]){const nearest=this.model.grids[axis].reduce((a,b)=>Math.abs(b-p[k])<Math.abs(a-p[k])?b:a,Infinity);p[k]=Math.abs(nearest-p[k])<threshold?nearest:Math.round(p[k]*4)/4;}
+    }return p;
+  }
+  drawClick(view,x,y){
+    if(view.kind!=='plan'){this.toast('Use Plan View for drawing; View → Plan switches the main viewport.');return;}
+    const p=this.snap(view,x,y);if(!p)return;const tool=this.state.tool;
+    if(tool==='joint'){let id;this.store.transact('Add joint',m=>id=this.getOrCreateNode(m,p).id);this.select('n:'+id);}
+    else if(tool==='column'){
+      const below=[...this.model.stories].filter(s=>s.z<this.state.storyZ-1e-7).sort((a,b)=>b.z-a.z)[0];if(!below)throw new Error('Choose a story above the base for a column.');let id;
+      this.store.transact('Draw column',m=>{const i=this.getOrCreateNode(m,[p[0],p[1],below.z]),j=this.getOrCreateNode(m,p);id=this.addFrame(m,i.id,j.id,m.sections.find(s=>s.id==='C500')?.id||m.sections[0].id).id;});this.select('e:'+id);
+    }else if(tool==='beam'){
+      if(!this.drawStart){this.drawStart=[...p];this.state.drawPreview=[p,p];this.refresh();return;}
+      const start=[...this.drawStart];let id;
+      this.store.transact('Draw beam',m=>{const i=this.getOrCreateNode(m,start),j=this.getOrCreateNode(m,p);id=this.addFrame(m,i.id,j.id,m.sections.find(s=>s.id==='B300')?.id||m.sections[0].id).id;});this.drawStart=null;this.state.drawPreview=null;this.select('e:'+id);
+    }
+  }
+  bindViewport(view){
+    const el=view.overlay;let down=null;const pointers=new Map();let pinch=null;
+    const point=e=>{const r=el.getBoundingClientRect();return{x:e.clientX-r.left,y:e.clientY-r.top};};
+    el.oncontextmenu=e=>{e.preventDefault();if(down?.moved)return;const p=point(e),hit=view.pick(p.x,p.y);if(hit&&!this.state.selection.has(hit.type+':'+hit.id))this.select(hit.type+':'+hit.id);this.popup([['inspect','Object properties','settings'],['load','Assign loads…','load'],['supports','Assign restraints…','support'],['releases','End releases…','release'],['section-assign','Assign section…','section'],null,['split','Split selected frames','split'],['delete','Delete selection','trash']],e.clientX,e.clientY);};
+    el.onpointerdown=e=>{
+      el.focus({preventScroll:true});const p=point(e);pointers.set(e.pointerId,p);el.setPointerCapture(e.pointerId);
+      if(pointers.size===2){const ps=[...pointers.values()];pinch={distance:Math.hypot(ps[0].x-ps[1].x,ps[0].y-ps[1].y),x:(ps[0].x+ps[1].x)/2,y:(ps[0].y+ps[1].y)/2};if(down)down.gesture=true;return;}
+      const hit=view.pick(p.x,p.y,this.state.tool==='move');down={x:p.x,y:p.y,lastX:p.x,lastY:p.y,hit,button:e.button,shift:e.shiftKey,moved:false,gesture:false};
+      if(this.state.tool==='move'&&hit?.type==='n'&&view.kind==='plan')down.moveNode=hit.id;
+    };
+    el.onpointermove=e=>{
+      const p=point(e);if(pointers.has(e.pointerId))pointers.set(e.pointerId,p);
+      if(pointers.size===2&&pinch){const ps=[...pointers.values()],d=Math.hypot(ps[0].x-ps[1].x,ps[0].y-ps[1].y),x=(ps[0].x+ps[1].x)/2,y=(ps[0].y+ps[1].y)/2;view.zoom(Math.log(pinch.distance/Math.max(d,1))*1000,x,y);view.pan(x-pinch.x,y-pinch.y);pinch={distance:d,x,y};return;}
+      if(view.kind==='plan'){
+        const wp=this.snap(view,p.x,p.y);if(wp){$('#coordinates').textContent=`X ${this.fmt(wp[0],'length')}  Y ${this.fmt(wp[1],'length')}`;if(this.state.tool!=='select')this.state.snapPoint=wp;if(this.drawStart)this.state.drawPreview=[this.drawStart,wp];}
+        if(this.drawStart||this.state.tool!=='select')for(const v of this.views)v.invalidate(true);
+      }
+      if(!down)return;const dx=p.x-down.lastX,dy=p.y-down.lastY;if(Math.hypot(p.x-down.x,p.y-down.y)>4)down.moved=true;
+      if(down.moved){
+        if(down.moveNode){this.state.snapPoint=this.snap(view,p.x,p.y);view.invalidate();}
+        else if(down.shift&&down.button===0&&this.state.tool==='select'){this.state.boxSelection={viewport:view,x:Math.min(down.x,p.x),y:Math.min(down.y,p.y),w:Math.abs(p.x-down.x),h:Math.abs(p.y-down.y)};view.invalidate();}
+        else if(down.button===1||down.button===2||view.kind!=='3d')view.pan(dx,dy);
+        else if(this.state.tool==='select')view.orbit(dx,dy);
+      }
+      down.lastX=p.x;down.lastY=p.y;
+    };
+    const up=e=>{
+      const p=point(e),gesture=pointers.size>1||down?.gesture;pointers.delete(e.pointerId);if(pointers.size<2)pinch=null;if(!down)return;const d=down;down=null;
+      if(gesture){this.state.boxSelection=null;return;}
+      this.guard(()=>{
+        if(d.moveNode&&d.moved){const point=this.snap(view,p.x,p.y);this.store.transact('Move joint',m=>{const n=m.nodes.find(n=>n.id===d.moveNode);[n.x,n.y,n.z]=point;});this.select('n:'+d.moveNode);}
+        else if(this.state.boxSelection){const b=this.state.boxSelection;for(const o of view.objects){const a=o.screenA,c=o.screenB;if(a.x>=b.x&&a.x<=b.x+b.w&&a.y>=b.y&&a.y<=b.y+b.h&&c.x>=b.x&&c.x<=b.x+b.w&&c.y>=b.y&&c.y<=b.y+b.h)this.state.selection.add(o.type+':'+o.id);}this.state.boxSelection=null;this.refresh();}
+        else if(!d.moved&&d.button===0){if(['beam','column','joint'].includes(this.state.tool))this.drawClick(view,p.x,p.y);else this.select(d.hit?d.hit.type+':'+d.hit.id:null,e.shiftKey||e.ctrlKey||e.metaKey);}
+      });
+    };
+    el.onpointerup=up;el.onpointercancel=e=>{pointers.delete(e.pointerId);down=null;pinch=null;this.state.boxSelection=null;view.invalidate();};
+    el.addEventListener('wheel',e=>{e.preventDefault();const p=point(e);view.zoom(e.deltaY,p.x,p.y);},{passive:false});
+    el.ondblclick=e=>{const p=point(e),hit=view.pick(p.x,p.y);if(hit){this.select(hit.type+':'+hit.id);this.action('inspect');}};
+    el.onpointerleave=()=>{if(!down){this.state.snapPoint=null;view.invalidate();}};
+  }
+  popup(items,x,y){const popup=$('#popup-menu');popup.innerHTML=items.map(item=>item?`<button data-action="${esc(item[0])}">${icon(item[2]||'cube',15)}${esc(item[1])}${item[3]?`<small>${esc(item[3])}</small>`:''}</button>`:'<hr>').join('');popup.classList.remove('hidden');popup.style.left=Math.min(x,window.innerWidth-240)+'px';popup.style.top=Math.min(y,window.innerHeight-popup.offsetHeight-12)+'px';}
+  installEvents(){
+    hydrateIcons();$('#menus').innerHTML=Object.keys(menus).map(name=>`<button data-menu="${name}">${name}</button>`).join('');
+    document.addEventListener('click',e=>{
+      const menu=e.target.closest('[data-menu]');if(menu){const r=menu.getBoundingClientRect();this.popup(menus[menu.dataset.menu],r.left,r.bottom);return;}
+      const action=e.target.closest('[data-action]');if(action){$('#popup-menu').classList.add('hidden');this.guard(()=>this.action(action.dataset.action));return;}
+      if(!e.target.closest('#popup-menu'))$('#popup-menu').classList.add('hidden');
+      const tool=e.target.closest('[data-tool]');if(tool){this.setTool(tool.dataset.tool);return;}
+      const toggle=e.target.closest('[data-toggle]');if(toggle){const key=toggle.dataset.toggle;this.state[key]=!this.state[key];this.refresh();return;}
+      const story=e.target.closest('[data-story]');if(story){this.state.storyZ=Number(story.dataset.story);this.refresh();return;}
+      const obj=e.target.closest('[data-object]');if(obj){this.select(obj.dataset.object,e.shiftKey);return;}
+      const cases=e.target.closest('[data-case],[data-resultcase]');if(cases){this.state.caseId=cases.dataset.case||cases.dataset.resultcase;this.setDisplay(cases.dataset.resultcase?'deformed':'loads');return;}
+      const mode=e.target.closest('[data-mode]');if(mode){this.state.modeIndex=Number(mode.dataset.mode);this.setDisplay('mode');return;}
+      const table=e.target.closest('[data-table]');if(table){this.state.table=table.dataset.table;this.refresh();return;}
+      const explorer=e.target.closest('[data-explorer]');if(explorer){this.state.explorer=explorer.dataset.explorer;this.refresh();return;}
+      const row=e.target.closest('[data-result-row]');if(row){const key=row.dataset.resultRow;if(key.startsWith('story:')){this.state.storyZ=Number(key.slice(6));this.refresh();}else if(key.startsWith('mode:')){this.state.modeIndex=Number(key.slice(5));this.setDisplay('mode');}else this.select(key,e.shiftKey);}
+    });
+    document.addEventListener('change',e=>{
+      const el=e.target;
+      if(el.dataset.property)this.guard(()=>{
+        const key=el.dataset.property,kind=el.dataset.kind;
+        this.store.transact('Edit '+key,m=>{
+          if(kind==='settings'){m.settings[key]=key==='modal'?el.checked:Number(el.value);return;}
+          if(kind==='element'){for(const selected of this.selectedElements()){const target=m.elements.find(x=>x.id===selected.id);target[key]=key==='roll'?quantity(el.value,'angle','deg'):el.value;}return;}
+          for(const selected of this.selectedNodes()){const n=m.nodes.find(n=>n.id===selected.id);if(key.startsWith('support:'))n.support[Number(key.split(':')[1])]=el.checked;else n[key]=quantity(el.value,key==='mass'?'mass':'length',key==='mass'?this.units.mass:this.units.length);}
+        });
+      });
+    });
+    $('#display-select').onchange=e=>this.setDisplay(e.target.value);
+    $('#case-select').onchange=e=>{this.state.caseId=e.target.value;this.refresh();};
+    for(const selector of ['#story-select','#main-story-select'])$(selector).onchange=e=>{this.state.storyZ=Number(e.target.value);this.drawStart=null;this.state.drawPreview=null;this.refresh();};
+    $('#mode-select').onchange=e=>{this.state.modeIndex=Number(e.target.value);this.refresh();};
+    $('#unit-select').onchange=e=>{this.state.units=e.target.value;this.refresh();};
+    $('#tree-search').oninput=()=>this.renderTree();
+    $('#file-input').onchange=async e=>{const file=e.target.files[0];if(!file)return;try{const model=parseProject(await file.text());this.store.replace(model,'Open project');this.refresh(true);this.toast('Project loaded. Run analysis to regenerate its results.');}catch(error){this.toast(error.message,true);}e.target.value='';};
+    document.addEventListener('keydown',e=>{
+      if(this.dialogs.root.open)return;const edit=['INPUT','SELECT','TEXTAREA'].includes(e.target.tagName);if(edit)return;
+      const ctrl=e.ctrlKey||e.metaKey,key=e.key.toLowerCase();let action=null;
+      if(ctrl)action=({s:'save',o:'open',n:'new',z:e.shiftKey?'redo':'undo',y:'redo',a:'select-all'})[key];
+      else if(key==='f5')action='run';else if(key==='f')action='fit';else if(key==='delete'||key==='backspace')action='delete';else if(key==='escape'){this.setTool('select');this.select(null);$('#popup-menu').classList.add('hidden');e.preventDefault();return;}
+      else if(['b','c','j','m','v'].includes(key)){this.setTool({b:'beam',c:'column',j:'joint',m:'move',v:'select'}[key]);e.preventDefault();return;}
+      else if(key===' '){action='animate';}else if(key==='/'){$('#tree-search').focus();e.preventDefault();return;}
+      if(action){e.preventDefault();this.guard(()=>this.action(action));}
+    });
+    for(const view of this.views)this.bindViewport(view);
+    const splitter=$('#viewport-splitter');splitter.onpointerdown=e=>{splitter.setPointerCapture(e.pointerId);const wrap=$('#viewports').getBoundingClientRect();splitter.onpointermove=ev=>{const t=Math.max(.2,Math.min(.8,(ev.clientX-wrap.left)/wrap.width));$('.main-viewport').style.flex=t;$('.plan-viewport').style.flex=1-t;};splitter.onpointerup=()=>splitter.onpointermove=null;};
+    const resize=$('#results-splitter');resize.onpointerdown=e=>{resize.setPointerCapture(e.pointerId);const rect=$('.main-workspace').getBoundingClientRect();resize.onpointermove=ev=>document.documentElement.style.setProperty('--results',Math.max(90,Math.min(rect.height*.6,rect.bottom-ev.clientY))+'px');resize.onpointerup=()=>resize.onpointermove=null;};
+    window.addEventListener('beforeunload',()=>{try{localStorage.setItem('stratum-frame-project-v1',this.store.snapshot());}catch{}});
+  }
+  exportCSV(){
+    if(this.state.table==='diagnostics'){download('stratum-analysis-log.csv','Time,Level,Message\r\n'+this.logs.map(l=>[l.time,l.level,l.message].map(csvCell).join(',')).join('\r\n'),'text/csv');return;}
+    const {headers,rows}=this.tableData();if(!rows.length){this.toast('There are no computed table rows to export.');return;}
+    download(`${safeName(this.model.name)}-${this.state.caseId}-${this.state.table}.csv`,[headers,...rows.map(r=>r.values)].map(r=>r.map(csvCell).join(',')).join('\r\n'),'text/csv');
+  }
+  exportReport(){
+    if(!this.state.results){this.toast('Run analysis before exporting a report.');return;}
+    const original=this.state.table,tables=[];
+    for(const key of['stories','joints','reactions','members','modes']){this.state.table=key;const t=this.tableData();tables.push(`<h2>${{stories:'Story response',joints:'Joint displacements',reactions:'Support reactions',members:'Frame end-I resisting forces',modes:'Modal results'}[key]}</h2><table><thead><tr>${t.headers.map(h=>`<th>${esc(h)}</th>`).join('')}</tr></thead><tbody>${t.rows.map(r=>`<tr>${r.values.map(v=>`<td>${esc(v)}</td>`).join('')}</tr>`).join('')}</tbody></table>`);}this.state.table=original;
+    const r=this.state.results,html=`<!doctype html><html lang="en"><meta charset="utf-8"><title>${esc(this.model.name)} — Analysis report</title><style>body{font:12px/1.6 system-ui,sans-serif;margin:40px;color:#34435a}h1{font-size:26px}h2{font-size:17px;margin-top:28px}table{border-collapse:collapse;width:100%;font-size:10px}th,td{padding:6px 8px;text-align:right;border-bottom:1px solid #dde3ed}th:first-child,td:first-child{text-align:left}th{background:#eef2f8}aside{padding:16px;background:#fff7e8;border:1px solid #e7dbbd;font-size:11px}small{color:#8293a8}@media print{body{margin:10mm}thead{display:table-header-group}tr{break-inside:avoid}}</style><h1>Stratum Frame / ${esc(this.model.name)}</h1><p>Computed ${esc(r.completedAt)} · Case/combination: <b>${esc(this.state.caseId)}</b> · Display units: ${esc(this.units.name)} · Model revision ${this.store.revision}</p><aside><b>RESEARCH RESULTS — NOT FOR DESIGN APPROVAL.</b> Linear, small-displacement, prismatic 3D Euler–Bernoulli frames with exact support/diaphragm constraints, independent release DOFs and consistent mass. No slabs, shells, shear deformation, P–Δ, buckling, nonlinear behavior, dynamic seismic loading, design code checks or automatic joint-mass gravity load. Modal values are undamped free-vibration eigenpairs. Example load combinations are illustrative. Verify independently before engineering use.</aside><h2>Solver diagnostics</h2><p>${r.stats.activeDOFs} active DOFs · ${r.stats.nonzeros||0} stiffness coefficients · ${r.stats.elapsedMs.toFixed(2)} ms · min. scaled pivot ${r.stats.minPivot?.toExponential(4)||'n/a'}</p><p>${r.warnings.map(esc).join('<br>')||'No solver warnings for this run.'}</p>${tables.join('')}<h2>Global equilibrium</h2><p>Applied + support resultant [FX,FY,FZ,MX,MY,MZ], in SI N/Nm: ${this.staticResult.equilibrium.map(v=>v.toExponential(4)).join(', ')}.</p><p>Frame tables give end-I element resisting forces; cut-face diagram signs differ at end I. Drift is calculated only between joints aligned in X/Y on adjacent reference stories. No drift adequacy check is performed. Sampled maxima may miss between-sample extrema.</p><h2>Model definition (canonical SI)</h2><details><summary>Reproducibility snapshot</summary><pre>${esc(JSON.stringify(this.model,null,2))}</pre></details><small>Independent implementation. Not affiliated with Computers and Structures, Inc. See the bundled analysis assumptions and benchmark report.</small></html>`;
+    download(safeName(this.model.name)+'-analysis-report.html',html,'text/html');
+  }
+  tick(time){
+    this.state.time=time/1000;if(this.state.animate)for(const view of this.views)view.invalidate(true);
+    for(const view of this.views)if(view.canvas.parentElement.clientWidth>0)view.render();requestAnimationFrame(this.tick);
+  }
+}
+function csvCell(value){let s=String(value??'');if(/^[=+@]/.test(s))s="'"+s;return '"'+s.replace(/"/g,'""')+'"';}
+const app=new Workbench();globalThis.stratum=app;app.init().catch(e=>{console.error(e);app.toast(e.message,true);});
+
+module.exports={};
+},
+"src/core/model.js":(module,__require)=>{
+const { AnalysisError, norm, sub }=__require("src/core/linalg.js");
+const GRAVITY=9.80665;
+function rectangularSection(id,name,b,h,material) {
+  const a=Math.max(b,h),c=Math.min(b,h);
+  return {id,name,material,b,h,A:b*h,Iy:b*h**3/12,Iz:h*b**3/12,J:a*c**3*(1/3-0.21*(c/a)*(1-c**4/(12*a**4))),shape:'rectangle'};
+}
+function emptyModel() {
+  return {schema:'stratum-frame',version:1,units:'SI',name:'Untitled structure',
+    grids:{x:[0,6,12,18],y:[0,6,12]},stories:[{id:'S0',name:'Base',z:0}],
+    materials:[{id:'C30',name:'Concrete C30 · elastic',E:30e9,nu:0.2,density:2500},{id:'S355',name:'Steel S355 · elastic',E:200e9,nu:0.3,density:7850}],
+    sections:[rectangularSection('C500','C500 × 500',0.5,0.5,'C30'),rectangularSection('B300','B300 × 600',0.3,0.6,'C30'),rectangularSection('B400','B400 × 700',0.4,0.7,'C30')],
+    nodes:[],elements:[],diaphragms:[],
+    cases:[{id:'DEAD',name:'Dead',selfWeight:1},{id:'LIVE',name:'Live',selfWeight:0},{id:'WINDX',name:'Wind X',selfWeight:0}],
+    combinations:[{id:'SERVICE',name:'Service · D + L',factors:{DEAD:1,LIVE:1}},{id:'ULS',name:'Illustrative · 1.2D + 1.6L',factors:{DEAD:1.2,LIVE:1.6}},{id:'LATERAL',name:'Illustrative · D + 0.5L + W',factors:{DEAD:1,LIVE:0.5,WINDX:1}}],
+    loads:[],settings:{modes:6,modal:true},notes:'Independent research workbench. Example combinations are illustrative, not code-approved.'};
+}
+function createBuilding({name='Atrium Office · 6-story frame',stories=6,baysX=3,baysY=2,bayX=6,bayY=6,height=3.4,diaphragms=true}={}) {
+  if(!Number.isInteger(stories)||stories<1||stories>16||!Number.isInteger(baysX)||baysX<1||baysX>8||!Number.isInteger(baysY)||baysY<1||baysY>8||Math.min(bayX,bayY,height)<=0)throw new Error('Template dimensions are outside the supported limits (1–16 stories, 1–8 bays).');
+  const m=emptyModel();m.name=name;m.grids={x:Array.from({length:baysX+1},(_,i)=>i*bayX),y:Array.from({length:baysY+1},(_,i)=>i*bayY)};
+  m.stories=Array.from({length:stories+1},(_,i)=>({id:'S'+i,name:i?'Story '+String(i).padStart(2,'0'):'Base',z:i*height}));
+  const ids=new Map();let ni=0,ei=0,li=0;
+  const node=(s,x,y)=>ids.get(`${s}/${x}/${y}`);
+  for(let s=0;s<=stories;s++)for(let y=0;y<=baysY;y++)for(let x=0;x<=baysX;x++) {
+    const id='J'+(++ni);ids.set(`${s}/${x}/${y}`,id);
+    m.nodes.push({id,x:x*bayX,y:y*bayY,z:s*height,support:Array(6).fill(s===0),mass:s?1800:0});
+  }
+  const beam=(a,b,sec)=>{const id='F'+(++ei);m.elements.push({id,i:a,j:b,section:sec,roll:0,releases:Array(12).fill(false)});return id;};
+  for(let s=1;s<=stories;s++) {
+    const members=[];
+    for(let y=0;y<=baysY;y++)for(let x=0;x<=baysX;x++) {
+      beam(node(s-1,x,y),node(s,x,y),'C500');
+      if(x<baysX)members.push(beam(node(s,x,y),node(s,x+1,y),'B300'));
+      if(y<baysY)members.push(beam(node(s,x,y),node(s,x,y+1),'B300'));
+      m.loads.push({id:'L'+(++li),case:'WINDX',type:'nodal',node:node(s,x,y),value:[2400*(s/stories),0,0,0,0,0]});
+    }
+    for(const id of members) for(const [loadCase,value]of [['DEAD',-8000],['LIVE',-5000]])m.loads.push({id:'L'+(++li),case:loadCase,type:'udl',element:id,system:'global',value:[0,0,value]});
+    if(diaphragms)m.diaphragms.push({id:'D'+s,name:'D'+s+' · rigid',nodes:m.nodes.filter(n=>Math.abs(n.z-s*height)<1e-8).map(n=>n.id)});
+  }
+  validateModel(m);return m;
+}
+const position=n=>[n.x,n.y,n.z];
+function uniqueId(model,key,prefix) {const ids=new Set(model[key].map(x=>x.id));let i=1;while(ids.has(prefix+i))i++;return prefix+i;}
+const finite=(v,label)=>{if(typeof v!=='number'||!Number.isFinite(v))throw new AnalysisError(`${label} must be a finite number.`);};
+function unique(items,label){const set=new Set();for(const item of items){if(!item||typeof item.id!=='string'||!/^[A-Za-z_][A-Za-z0-9_.-]*$/.test(item.id)||['__proto__','constructor','prototype'].includes(item.id)||set.has(item.id))throw new AnalysisError(`${label} IDs must be unique identifiers (letters, digits, underscore, dot, hyphen; no reserved names).`);if(item.name!==undefined&&typeof item.name!=='string')throw new AnalysisError(`${label} names must be strings.`);set.add(item.id);}return set;}
+function validateModel(m) {
+  if(!m||m.schema!=='stratum-frame'||m.version!==1||m.units!=='SI')throw new AnalysisError('Unsupported project schema/version or non-SI storage units. Expected stratum-frame v1 with SI values.');
+  for(const key of ['nodes','elements','materials','sections','stories','cases','combinations','loads','diaphragms'])if(!Array.isArray(m[key]))throw new AnalysisError(`Missing ${key} collection.`);
+  for(const key of ['materials','sections','stories','cases'])if(!m[key].length)throw new AnalysisError(`At least one ${key} definition is required.`);
+  if(!m.settings||typeof m.settings.modal!=='boolean')throw new AnalysisError('Analysis settings must include a boolean modal flag.');
+  if(m.nodes.length>2000||m.elements.length>6000)throw new AnalysisError('This build accepts up to 2,000 joints and 6,000 frame elements; skyline storage has a separate memory limit.');
+  const ns=unique(m.nodes,'Joint'),es=unique(m.elements,'Frame'),ms=unique(m.materials,'Material'),ss=unique(m.sections,'Section'),cs=unique(m.cases,'Load case');
+  const combs=unique(m.combinations,'Combination');unique(m.loads,'Load');unique(m.stories,'Story');unique(m.diaphragms,'Diaphragm');
+  for(const id of combs)if(cs.has(id))throw new AnalysisError('Load case and combination IDs must be distinct.');
+  for(const mat of m.materials) {finite(mat.E,'E');finite(mat.nu,'Poisson ratio');finite(mat.density,'Density');if(mat.E<=0||mat.nu<=-1||mat.nu>=0.5||mat.density<0)throw new AnalysisError(`Invalid elastic material ${mat.id}. E > 0, −1 < nu < 0.5, density ≥ 0 required.`);}
+  for(const sec of m.sections){if(!ms.has(sec.material))throw new AnalysisError(`Section ${sec.id} references an unknown material.`);for(const k of ['A','Iy','Iz','J']){finite(sec[k],`${sec.id}.${k}`);if(sec[k]<=0)throw new AnalysisError(`Section ${sec.id}: ${k} must be positive.`);}if(sec.b!==undefined&&(!Number.isFinite(sec.b)||!Number.isFinite(sec.h)||!(sec.b>0)||!(sec.h>0)))throw new AnalysisError('Display section dimensions must be positive.');}
+  const coords=new Map();const warnings=[];
+  for(const n of m.nodes){for(const k of ['x','y','z'])finite(n[k],`${n.id}.${k}`);if(!Array.isArray(n.support)||n.support.length!==6||n.support.some(v=>typeof v!=='boolean'))throw new AnalysisError(`Joint ${n.id} needs six boolean support flags.`);finite(n.mass??0,`${n.id}.mass`);if(n.mass<0)throw new AnalysisError('Joint mass cannot be negative.');
+    if(n.massInertia!==undefined){if(!Array.isArray(n.massInertia)||n.massInertia.length!==3)throw new AnalysisError('Joint rotational inertia must have three values.');for(const v of n.massInertia){finite(v,'Rotational inertia');if(v<0)throw new AnalysisError('Rotational inertia cannot be negative.');}}
+    const k=[n.x,n.y,n.z].map(x=>x.toFixed(8)).join('/');if(coords.has(k))warnings.push(`Coincident joints ${coords.get(k)} and ${n.id} are not automatically merged.`);coords.set(k,n.id);
+  }
+  const nm=new Map(m.nodes.map(n=>[n.id,n])),connections=new Map();
+  for(const e of m.elements){if(!ns.has(e.i)||!ns.has(e.j)||!ss.has(e.section))throw new AnalysisError(`Frame ${e.id} has a missing joint or section.`);if(norm(sub(position(nm.get(e.i)),position(nm.get(e.j))))<1e-8)throw new AnalysisError(`Frame ${e.id} has zero length.`);finite(e.roll??0,`${e.id}.roll`);if(e.releases&&(!Array.isArray(e.releases)||e.releases.length!==12||e.releases.some(v=>typeof v!=='boolean')))throw new AnalysisError(`Frame ${e.id} requires 12 boolean release flags.`);const key=[e.i,e.j].sort().join('/');if(connections.has(key))warnings.push(`Overlapping frames ${connections.get(key)} and ${e.id} both contribute stiffness and mass.`);connections.set(key,e.id);}
+  for(const c of m.cases)finite(c.selfWeight??0,`${c.id}.selfWeight`);
+  for(const c of m.combinations){if(!c.factors||Array.isArray(c.factors)||typeof c.factors!=='object')throw new AnalysisError('A combination needs a case-to-factor object.');for(const [id,f]of Object.entries(c.factors)){if(!cs.has(id))throw new AnalysisError(`Combination ${c.id} references unknown case ${id}. Nested combinations are not supported.`);finite(f,`${c.id}.${id}`);}}
+  for(const l of m.loads){if(!cs.has(l.case))throw new AnalysisError(`Load ${l.id} has an unknown case.`);if(!['nodal','udl','point'].includes(l.type))throw new AnalysisError(`Unsupported load type ${l.type}.`);if(!Array.isArray(l.value)||l.value.length!==(l.type==='nodal'?6:3))throw new AnalysisError(`Load ${l.id} has an invalid vector.`);for(const v of l.value)finite(v,`Load ${l.id}`);if(l.type==='nodal'){if(l.system!==undefined&&l.system!=='global')throw new AnalysisError('Joint loads must be expressed in global axes.');if(!ns.has(l.node))throw new AnalysisError(`Load ${l.id} references an unknown joint.`);}else{if(!es.has(l.element))throw new AnalysisError(`Load ${l.id} references an unknown frame.`);if(!['global','local'].includes(l.system))throw new AnalysisError(`Load ${l.id} must specify global or local axes.`);if(l.type==='point'){finite(l.position,'Point-load position');if(l.position<=0||l.position>=1)throw new AnalysisError('Member point loads must lie strictly inside 0 < a/L < 1. Use joint loads at endpoints.');}}}
+  const claimed=new Set();
+  for(const d of m.diaphragms){if(!Array.isArray(d.nodes)||d.nodes.length<2||new Set(d.nodes).size!==d.nodes.length)throw new AnalysisError(`Diaphragm ${d.id} needs at least two distinct joints.`);let z=null;let spread=0;let first=null;for(const id of d.nodes){const n=nm.get(id);if(!n||claimed.has(id))throw new AnalysisError(`Diaphragm ${d.id} has a missing or multiply-assigned joint.`);if(n.support[0]||n.support[1]||n.support[5])throw new AnalysisError(`Diaphragm ${d.id}: horizontal or RZ restraints on diaphragm joints are not supported. Remove that assignment or support.`);if(z!==null&&Math.abs(z-n.z)>1e-6)throw new AnalysisError(`Diaphragm ${d.id} must be horizontal and coplanar within 1e-6 m.`);z=n.z;claimed.add(id);if(!first)first=n;spread=Math.max(spread,Math.hypot(n.x-first.x,n.y-first.y));}if(spread<1e-8)throw new AnalysisError(`Diaphragm ${d.id} has no in-plane extent.`);}
+  const elevations=new Set();for(const s of m.stories){finite(s.z,`${s.id}.elevation`);if(elevations.has(s.z))throw new AnalysisError('Story elevations must be distinct.');elevations.add(s.z);}
+  if(!m.grids||!Array.isArray(m.grids.x)||!Array.isArray(m.grids.y))throw new AnalysisError('Grid coordinates are required.');for(const dir of ['x','y']){let last=-Infinity;for(const x of m.grids[dir]){finite(x,'Grid coordinate');if(x<=last)throw new AnalysisError('Grid coordinates must be strictly increasing.');last=x;}}
+  if(m.settings?.modes!==undefined&&(!Number.isInteger(m.settings.modes)||m.settings.modes<1||m.settings.modes>24))throw new AnalysisError('Request between 1 and 24 modes.');
+  return warnings;
+}
+function parseProject(text){if(text.length>25_000_000)throw new Error('Project file exceeds 25 MB.');const m=JSON.parse(text);validateModel(m);return m;}
+
+module.exports={GRAVITY,rectangularSection,emptyModel,createBuilding,position,uniqueId,validateModel,parseProject};
+},
+"src/core/linalg.js":(module,__require)=>{
+/** Float64 linear algebra. No regularization or artificial support stiffness. */
+class AnalysisError extends Error {
+  constructor(message, details = {}) { super(message); this.name = 'AnalysisError'; this.details = details; }
+}
+const dot = (a, b) => { let s = 0; for (let i = 0; i < a.length; i++) s += a[i] * b[i]; return s; };
+const norm = a => Math.sqrt(dot(a, a));
+function axpy(y, x, a) { for (let i = 0; i < y.length; i++) y[i] += a * x[i]; return y; }
+const cross = (a, b) => [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]];
+const sub = (a, b) => a.map((v, i) => v-b[i]);
+const add = (a, b) => a.map((v, i) => v+b[i]);
+const scale = (a, t) => a.map(v => v*t);
+const unit = a => { const n = norm(a); if (n < 1e-14) throw new AnalysisError('Cannot normalize a zero-length vector.'); return scale(a, 1/n); };
+
+/** Full symmetric CSR storage: assembly deliberately preserves both triangles. */
+class SparseBuilder {
+  constructor(n) { this.n = n; this.rows = Array.from({length:n}, () => new Map()); }
+  add(i, j, v) { if (v) this.rows[i].set(j, (this.rows[i].get(j) || 0) + v); }
+  diagonal(i) { return this.rows[i].get(i) || 0; }
+  finish(active = null) {
+    const order = active || Array.from({length:this.n}, (_,i) => i);
+    const inverse = new Int32Array(this.n).fill(-1); order.forEach((v,i) => inverse[v] = i);
+    const ptr = new Int32Array(order.length+1), cols=[], vals=[];
+    for (let i=0;i<order.length;i++) {
+      for (const [j,v] of [...this.rows[order[i]]].sort((a,b) => a[0]-b[0])) {
+        if (inverse[j] >= 0 && v !== 0) { cols.push(inverse[j]); vals.push(v); }
+      }
+      ptr[i+1] = cols.length;
+    }
+    return new CSR(order.length, ptr, Int32Array.from(cols), Float64Array.from(vals));
+  }
+}
+class CSR {
+  constructor(n, ptr, col, val) { Object.assign(this,{n,ptr,col,val}); }
+  mul(x, out = new Float64Array(this.n)) {
+    for (let i=0;i<this.n;i++) { let s=0; for (let p=this.ptr[i];p<this.ptr[i+1];p++) s+=this.val[p]*x[this.col[p]]; out[i]=s; }
+    return out;
+  }
+  diag() { const d=new Float64Array(this.n); for(let i=0;i<this.n;i++) for(let p=this.ptr[i];p<this.ptr[i+1];p++) if(this.col[p]===i) d[i]=this.val[p]; return d; }
+  get(i,j) { for(let p=this.ptr[i];p<this.ptr[i+1];p++) if(this.col[p]===j) return this.val[p]; return 0; }
+}
+function reverseCuthillMcKee(A) {
+  const n=A.n, degree=Array.from({length:n},(_,i)=>A.ptr[i+1]-A.ptr[i]-1);
+  const seen=new Uint8Array(n), order=[];
+  while(order.length<n) {
+    let start=-1;
+    for(let i=0;i<n;i++) if(!seen[i] && (start<0 || degree[i]<degree[start])) start=i;
+    const queue=[start]; seen[start]=1;
+    for(let h=0;h<queue.length;h++) {
+      const i=queue[h]; order.push(i); const next=[];
+      for(let p=A.ptr[i];p<A.ptr[i+1];p++) { const j=A.col[p]; if(j!==i && !seen[j]) {seen[j]=1;next.push(j);} }
+      next.sort((a,b)=>degree[a]-degree[b]||a-b); queue.push(...next);
+    }
+  }
+  return Int32Array.from(order.reverse());
+}
+/** RCM-reordered, diagonally equilibrated skyline LDLᵀ. Positive pivots certify SPD
+ * to the declared relative tolerance; a bad pivot stops analysis, never patches it. */
+class SkylineLDLT {
+  constructor(A, labels=[], pivotTolerance=1e-12) {
+    this.A=A; const n=A.n; this.n=n;
+    this.perm=reverseCuthillMcKee(A); this.inv=new Int32Array(n);
+    this.perm.forEach((old,i)=>this.inv[old]=i);
+    const diag=A.diag(); this.scaling=new Float64Array(n);
+    for(let i=0;i<n;i++) {
+      if(!(diag[i]>0) || !Number.isFinite(diag[i])) throw new AnalysisError(`Zero or invalid stiffness at ${labels[i] || 'DOF '+i}.`,{dof:labels[i],diagonal:diag[i]});
+      this.scaling[i]=1/Math.sqrt(diag[i]);
+    }
+    this.first=Int32Array.from({length:n},(_,i)=>i);
+    for(let old=0;old<n;old++) for(let p=A.ptr[old];p<A.ptr[old+1];p++) {
+      const i=this.inv[old],j=this.inv[A.col[p]];
+      if(j<i && A.val[p]!==0) this.first[i]=Math.min(this.first[i],j);
+    }
+    this.offset=new Int32Array(n+1);
+    for(let i=0;i<n;i++) this.offset[i+1]=this.offset[i]+i-this.first[i]+1;
+    if(this.offset[n]>24_000_000) throw new AnalysisError('Skyline profile exceeds the 24 million coefficient safety limit. Reduce model size or bandwidth.');
+    this.L=new Float64Array(this.offset[n]); this.D=new Float64Array(n);
+    for(let old=0;old<n;old++) for(let p=A.ptr[old];p<A.ptr[old+1];p++) {
+      const i=this.inv[old],j=this.inv[A.col[p]];
+      if(j<=i) this.L[this.offset[i]+j-this.first[i]]=A.val[p]*this.scaling[old]*this.scaling[A.col[p]];
+    }
+    let minPivot=Infinity;
+    for(let i=0;i<n;i++) {
+      const fi=this.first[i], oi=this.offset[i]-fi;
+      for(let j=fi;j<i;j++) {
+        let v=this.L[oi+j]; const oj=this.offset[j]-this.first[j];
+        for(let k=Math.max(fi,this.first[j]);k<j;k++) v-=this.L[oi+k]*this.D[k]*this.L[oj+k];
+        this.L[oi+j]=v/this.D[j];
+      }
+      let d=this.L[oi+i];
+      for(let j=fi;j<i;j++) d-=this.L[oi+j]**2*this.D[j];
+      if(!Number.isFinite(d) || d<=pivotTolerance) {
+        const label=labels[this.perm[i]] || 'DOF '+this.perm[i];
+        throw new AnalysisError(`Instability or excessive ill-conditioning near ${label}. Scaled pivot ${d.toExponential(3)}. Check supports, disconnected joints, releases and diaphragms.`,{dof:label,pivot:d,tolerance:pivotTolerance});
+      }
+      this.D[i]=d; minPivot=Math.min(minPivot,d); this.L[oi+i]=1;
+    }
+    this.stats={minPivot,profile:this.L.length,nonzeros:A.val.length,bandwidth:Math.max(0,...Array.from(this.first,(v,i)=>i-v))};
+  }
+  solve(b) {
+    const n=this.n, y=new Float64Array(n);
+    for(let i=0;i<n;i++) {
+      let s=b[this.perm[i]]*this.scaling[this.perm[i]],o=this.offset[i]-this.first[i];
+      for(let j=this.first[i];j<i;j++) s-=this.L[o+j]*y[j]; y[i]=s;
+    }
+    for(let i=0;i<n;i++) y[i]/=this.D[i];
+    for(let i=n-1;i>=0;i--) { const o=this.offset[i]-this.first[i]; for(let j=this.first[i];j<i;j++) y[j]-=this.L[o+j]*y[i]; }
+    const x=new Float64Array(n); for(let i=0;i<n;i++) x[this.perm[i]]=y[i]*this.scaling[this.perm[i]];
+    return x;
+  }
+  solveRefined(b) {
+    const x=this.solve(b); let residual=0;
+    for(let k=0;k<3;k++) {
+      const r=this.A.mul(x); for(let i=0;i<r.length;i++) r[i]=b[i]-r[i];
+      residual=norm(r)/Math.max(norm(b),1);
+      if(residual<1e-10) break;
+      axpy(x,this.solve(r),1);
+    }
+    const r=this.A.mul(x); for(let i=0;i<r.length;i++) r[i]-=b[i];
+    residual=norm(r)/Math.max(norm(b),1);
+    if(!Number.isFinite(residual)||residual>1e-7||x.some(v=>!Number.isFinite(v))) throw new AnalysisError(`Static equilibrium residual ${residual.toExponential(3)} exceeds 1e-7.`,{residual});
+    return {x,residual};
+  }
+}
+
+/** Jacobi rotations for a small, symmetric Rayleigh–Ritz matrix (not global K). */
+function jacobiEigen(input,n,tol=1e-13,maxSweeps=100) {
+  const a=Float64Array.from(input),v=new Float64Array(n*n); for(let i=0;i<n;i++)v[i*n+i]=1;
+  for(let sweep=0;sweep<maxSweeps;sweep++) {
+    let off=0,diagonal=0;
+    for(let i=0;i<n;i++) {diagonal=Math.max(diagonal,Math.abs(a[i*n+i])); for(let j=i+1;j<n;j++)off=Math.max(off,Math.abs(a[i*n+j]));}
+    if(off<=tol*Math.max(diagonal,1e-30)) break;
+    for(let p=0;p<n-1;p++) for(let q=p+1;q<n;q++) {
+      const apq=a[p*n+q]; if(Math.abs(apq)<=tol*Math.max(diagonal,1e-30))continue;
+      const tau=(a[q*n+q]-a[p*n+p])/(2*apq),t=(tau>=0?1:-1)/(Math.abs(tau)+Math.sqrt(1+tau*tau)),c=1/Math.sqrt(1+t*t),s=t*c;
+      a[p*n+p]-=t*apq; a[q*n+q]+=t*apq; a[p*n+q]=a[q*n+p]=0;
+      for(let k=0;k<n;k++) if(k!==p&&k!==q) {const x=a[k*n+p],y=a[k*n+q];a[k*n+p]=a[p*n+k]=c*x-s*y;a[k*n+q]=a[q*n+k]=s*x+c*y;}
+      for(let k=0;k<n;k++) {const x=v[k*n+p],y=v[k*n+q];v[k*n+p]=c*x-s*y;v[k*n+q]=s*x+c*y;}
+    }
+  }
+  const ids=Array.from({length:n},(_,i)=>i).sort((i,j)=>a[i*n+i]-a[j*n+j]);
+  return {values:ids.map(i=>a[i*n+i]),vectors:ids.map(i=>Float64Array.from({length:n},(_,j)=>v[j*n+i]))};
+}
+function mOrthonormalize(X,M) {
+  const Q=[],MQ=[];
+  for(const x0 of X) {
+    const x=Float64Array.from(x0),initialNorm=Math.sqrt(Math.max(0,dot(x,M.mul(x))));
+    if(!(initialNorm>0))continue;
+    for(let repeat=0;repeat<2;repeat++) for(let i=0;i<Q.length;i++) axpy(x,Q[i],-dot(x,MQ[i]));
+    const mx=M.mul(x),len=Math.sqrt(dot(x,mx));
+    if(!Number.isFinite(len))throw new AnalysisError('Invalid modal mass norm. Check material density and joint mass.');
+    if(!(len>1e-12*initialNorm))continue;
+    for(let j=0;j<x.length;j++){x[j]/=len;mx[j]/=len;}
+    Q.push(x);MQ.push(mx);
+  }
+  return Q;
+}
+/** Deterministic inverse subspace iteration, M-orthogonalization and Ritz extraction.
+ * Every accepted eigenpair carries a normwise residual, not just frequency change. */
+function lowestModes(K,M,factor,count=6,{tolerance=1e-8,maxIterations=160,onProgress=()=>{}}={}) {
+  const n=K.n;let requested=Math.min(n,count),p=Math.min(n,Math.max(requested+5,requested*2));
+  let seed=314159265;const random=()=>{seed^=seed<<13;seed^=seed>>>17;seed^=seed<<5;return (seed>>>0)/4294967296-0.5;};
+  const kd=K.diag();
+  let Q=mOrthonormalize(Array.from({length:p},()=>Float64Array.from(kd,d=>random()/Math.sqrt(d))),M),modes=[];
+  if(!Q.length)throw new AnalysisError('No finite, positive-mass modal subspace is available.');
+  p=Q.length;requested=Math.min(requested,p);
+  for(let iteration=1;iteration<=maxIterations;iteration++) {
+    Q=mOrthonormalize(Q.map(x=>factor.solve(M.mul(x))),M);
+    if(Q.length<requested)throw new AnalysisError('The requested modal subspace lost numerical rank. Reduce the mode count or improve the mass/stiffness scaling.');
+    p=Q.length;
+    const KQ=Q.map(x=>K.mul(x)),small=new Float64Array(p*p);
+    for(let i=0;i<p;i++) for(let j=0;j<=i;j++) small[i*p+j]=small[j*p+i]=(dot(Q[i],KQ[j])+dot(Q[j],KQ[i]))/2;
+    const eig=jacobiEigen(small,p);
+    Q=eig.vectors.map(coeff=>{const x=new Float64Array(n);for(let i=0;i<p;i++)axpy(x,Q[i],coeff[i]);return x;});
+    modes=[];
+    for(let i=0;i<requested;i++) {
+      const x=Q[i],kx=K.mul(x),mx=M.mul(x),lambda=dot(x,kx)/dot(x,mx),r=Float64Array.from(kx,(v,j)=>v-lambda*mx[j]);
+      const residual=norm(r)/Math.max(norm(kx)+Math.abs(lambda)*norm(mx),1e-30);
+      if(!(lambda>0)) throw new AnalysisError('A non-positive modal eigenvalue was found.');
+      modes.push({lambda,x,residual,iterations:iteration});
+    }
+    if(iteration%8===0)onProgress({stage:'Modal iterations',iteration,residual:Math.max(...modes.map(m=>m.residual))});
+    if(modes.every(m=>m.residual<tolerance)) return modes;
+  }
+  throw new AnalysisError(`Modal solution did not meet the ${tolerance} residual tolerance in ${maxIterations} iterations.`,{residuals:modes.map(m=>m.residual)});
+}
+
+module.exports={AnalysisError,dot,norm,axpy,cross,sub,add,scale,unit,SparseBuilder,CSR,SkylineLDLT,jacobiEigen,lowestModes};
+},
+"src/core/units.js":(module,__require)=>{
+/** All persisted and solved values are SI. Parsing is dimension-checked; no eval. */
+const units={
+  m:['length',1],mm:['length',1e-3],cm:['length',1e-2],ft:['length',0.3048],in:['length',0.0254],
+  m2:['area',1],mm2:['area',1e-6],cm2:['area',1e-4],in2:['area',0.0254**2],ft2:['area',0.3048**2],
+  m4:['inertia',1],mm4:['inertia',1e-12],cm4:['inertia',1e-8],in4:['inertia',0.0254**4],
+  N:['force',1],kN:['force',1e3],MN:['force',1e6],lbf:['force',4.4482216152605],kip:['force',4448.2216152605],
+  Nm:['moment',1],kNm:['moment',1e3],Nmm:['moment',1e-3],'kip-ft':['moment',1355.8179483314],
+  'N/m':['lineLoad',1],'kN/m':['lineLoad',1e3],'N/mm':['lineLoad',1e3],'kip/ft':['lineLoad',14593.9029372064],
+  Pa:['stress',1],kPa:['stress',1e3],MPa:['stress',1e6],GPa:['stress',1e9],psi:['stress',6894.757293168],ksi:['stress',6894757.293168],
+  kg:['mass',1],t:['mass',1000],lbm:['mass',0.45359237],'kg/m3':['density',1],
+  rad:['angle',1],deg:['angle',Math.PI/180], 'kgm2':['massInertia',1]
+};
+function clean(s){return s.replace(/\s/g,'').replace(/²/g,'2').replace(/⁴/g,'4').replace(/³/g,'3').replace(/\^/g,'').replace(/·/g,'');}
+function quantity(text,dimension,defaultUnit) {
+  if(typeof text==='number')text=String(text);
+  const match=String(text).trim().match(/^([+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?)\s*(.*)$/i);
+  if(!match)throw new Error(`Invalid ${dimension} quantity: “${text}”.`);
+  const value=Number(match[1]),suffix=clean(match[2]||defaultUnit||'');
+  if(!Number.isFinite(value))throw new Error('A finite quantity is required.');
+  if(dimension==='dimensionless') {if(suffix)throw new Error('This field is dimensionless.');return value;}
+  if(!units[suffix] || units[suffix][0]!==dimension) throw new Error(`Expected ${dimension}; “${suffix}” is not a compatible unit.`);
+  return value*units[suffix][1];
+}
+const displaySystems={
+  SI:{name:'kN, m',length:'m',force:'kN',moment:'kNm',lineLoad:'kN/m',stress:'MPa',area:'m2',inertia:'m4',mass:'kg',angle:'rad'},
+  MM:{name:'N, mm',length:'mm',force:'N',moment:'Nmm',lineLoad:'N/mm',stress:'MPa',area:'mm2',inertia:'mm4',mass:'kg',angle:'rad'},
+  US:{name:'kip, ft',length:'ft',force:'kip',moment:'kip-ft',lineLoad:'kip/ft',stress:'ksi',area:'ft2',inertia:'in4',mass:'lbm',angle:'rad'}
+};
+const unitFactor=u=>units[clean(u)]?.[1]??1;
+function formatValue(value,dimension,system='SI',digits=3) {
+  const u=displaySystems[system][dimension],v=value/unitFactor(u);
+  return Number.isFinite(v)?v.toLocaleString('en-US',{maximumFractionDigits:digits,minimumFractionDigits:0}):'—';
+}
+
+module.exports={quantity,displaySystems,unitFactor,formatValue};
+},
+"src/core/elements.js":(module,__require)=>{
+const { AnalysisError, norm, unit, cross, sub, dot }=__require("src/core/linalg.js");
+const DOFS=['UX','UY','UZ','RX','RY','RZ'];
+const LOCAL_DOFS=['u1','u2','u3','r1','r2','r3'];
+function localAxes(a,b,roll=0) {
+  const dx=sub(b,a),L=norm(dx); if(L<1e-8)throw new AnalysisError('Frame element length is below 1e-8 m.');
+  const x=unit(dx),reference=Math.abs(x[2])<0.95?[0,0,1]:[0,1,0];
+  const y0=unit(cross(reference,x)),z0=cross(x,y0),c=Math.cos(roll),s=Math.sin(roll);
+  const y=y0.map((v,i)=>v*c+z0[i]*s),z=z0.map((v,i)=>v*c-y0[i]*s);
+  return {L,R:[x,y,z]};
+}
+function block(matrix,indices,values,factor=1,signs=null) {
+  const n=indices.length;
+  for(let i=0;i<n;i++)for(let j=0;j<n;j++) matrix[indices[i]*12+indices[j]]+=values[i*n+j]*factor*(signs?signs[i]*signs[j]:1);
+}
+/** 2-node, prismatic, 12-DOF spatial Euler–Bernoulli frame. Local x=i→j.
+ * Local y is Z×x (Y×x for near-vertical elements); local z=x×y.
+ * G=E/[2(1+nu)]. J is the Saint-Venant torsion constant, not Iy+Iz. */
+function frameMatrices(L,section,material) {
+  const {A,Iy,Iz,J}=section,{E,nu,density}=material,G=E/(2*(1+nu)),m=density*A*L;
+  const K=new Float64Array(144),M=new Float64Array(144);
+  block(K,[0,6],[1,-1,-1,1],E*A/L);
+  block(K,[3,9],[1,-1,-1,1],G*J/L);
+  const kb=[12,6*L,-12,6*L,6*L,4*L*L,-6*L,2*L*L,-12,-6*L,12,-6*L,6*L,2*L*L,-6*L,4*L*L];
+  block(K,[1,5,7,11],kb,E*Iz/L**3);
+  block(K,[2,4,8,10],kb,E*Iy/L**3,[1,-1,1,-1]);
+  block(M,[0,6],[2,1,1,2],m/6);
+  block(M,[3,9],[2,1,1,2],density*(Iy+Iz)*L/6);
+  const mb=[156,22*L,54,-13*L,22*L,4*L*L,13*L,-3*L*L,54,13*L,156,-22*L,-13*L,-3*L*L,-22*L,4*L*L];
+  block(M,[1,5,7,11],mb,m/420);
+  block(M,[2,4,8,10],mb,m/420,[1,-1,1,-1]);
+  return {K,M};
+}
+function hermite(t,L) { return [1-3*t*t+2*t**3,L*(t-2*t*t+t**3),3*t*t-2*t**3,L*(-t*t+t**3)]; }
+function uniformLoad(q,L) {
+  const f=new Float64Array(12);
+  for(let d=0;d<3;d++)f[d]=f[d+6]=q[d]*L/2;
+  f[5]=q[1]*L*L/12;f[11]=-f[5];f[4]=-q[2]*L*L/12;f[10]=-f[4];return f;
+}
+function pointLoad(p,t,L) {
+  const f=new Float64Array(12),h=hermite(t,L);
+  f[0]=p[0]*(1-t);f[6]=p[0]*t;
+  [1,5,7,11].forEach((v,i)=>f[v]=p[1]*h[i]);
+  [2,4,8,10].forEach((v,i)=>f[v]=p[2]*h[i]*[1,-1,1,-1][i]);
+  return f;
+}
+function mat12Vec(a,x) { const y=new Float64Array(12);for(let i=0;i<12;i++)for(let j=0;j<12;j++)y[i]+=a[i*12+j]*x[j];return y; }
+function localToGlobal(R,v) {return [0,1,2].map(i=>R[0][i]*v[0]+R[1][i]*v[1]+R[2][i]*v[2]);}
+function globalToLocal(R,v) {return R.map(r=>dot(r,v));}
+
+/** Internal resultants acting on the positive-x cut face of the LEFT segment.
+ * N,V2,V3,T,M2,M3 = -f_i minus distributed/point loads to the cut.
+ * In particular M3=-f_i5+x*f_i1+∫(x-s)q2(s)ds.
+ * End checks: section(0+)=-f_i, section(L-)=+f_j (interior point loads excluded at end).
+ */
+function sectionForces(end,q,points,x,L) {
+  const result=[-end[0]-q[0]*x,-end[1]-q[1]*x,-end[2]-q[2]*x,-end[3],-end[4]-end[2]*x-q[2]*x*x/2,-end[5]+end[1]*x+q[1]*x*x/2];
+  for(const p of points) if(x>=p.position*L-1e-12) {
+    const a=x-p.position*L; result[0]-=p.value[0];result[1]-=p.value[1];result[2]-=p.value[2];result[4]-=p.value[2]*a;result[5]+=p.value[1]*a;
+  }
+  return result;
+}
+/** Cubic FE kinematics + exact fixed-end particular solutions for full-span UDL
+ * and interior concentrated forces. Thus fixed/fixed one-element beams display
+ * nonzero within-element deflections even when every nodal DOF is constrained. */
+function memberDisplacement(localU,t,L,section,material,q=[0,0,0],points=[]) {
+  const h=hermite(t,L),x=t*L;
+  let u=localU[0]*(1-t)+localU[6]*t;
+  let v=h[0]*localU[1]+h[1]*localU[5]+h[2]*localU[7]+h[3]*localU[11];
+  let w=h[0]*localU[2]-h[1]*localU[4]+h[2]*localU[8]-h[3]*localU[10];
+  u+=q[0]*x*(L-x)/(2*material.E*section.A);
+  v+=q[1]*x*x*(L-x)**2/(24*material.E*section.Iz);
+  w+=q[2]*x*x*(L-x)**2/(24*material.E*section.Iy);
+  for(const p of points) {
+    const a=p.position*L,b=L-a;
+    u+=p.value[0]*(x<=a?x*b/L:a*(L-x)/L)/(material.E*section.A);
+    const fixedShape=x<=a ? b*b*x*x*(3*a*L-(L+2*a)*x)/(6*L**3) : a*a*(L-x)**2*(3*b*L-(L+2*b)*(L-x))/(6*L**3);
+    v+=p.value[1]*fixedShape/(material.E*section.Iz);w+=p.value[2]*fixedShape/(material.E*section.Iy);
+  }
+  return [u,v,w];
+}
+
+module.exports={DOFS,LOCAL_DOFS,localAxes,frameMatrices,hermite,uniformLoad,pointLoad,mat12Vec,localToGlobal,globalToLocal,sectionForces,memberDisplacement};
+},
+"src/ui/store.js":(module,__require)=>{
+const {validateModel,parseProject}=__require("src/core/model.js");
+function storageOrNull(){try{return globalThis.localStorage;}catch{return null;}}
+class ProjectStore extends EventTarget {
+  constructor(model,{storage=storageOrNull(),maxHistory=60,maxHistoryBytes=24_000_000}={}) {
+    super();validateModel(model);this.model=structuredClone(model);this.storage=storage;this.revision=0;this.past=[];this.future=[];this.maxHistory=maxHistory;this.maxHistoryBytes=maxHistoryBytes;this.saved=!!storage;
+  }
+  snapshot(){return JSON.stringify(this.model);}
+  transact(label,edit){
+    const before=this.snapshot(),next=structuredClone(this.model);edit(next);validateModel(next);
+    const after=JSON.stringify(next);if(before===after)return false;
+    this.past.push({label,json:before});this.future.length=0;this.trimHistory();this.model=next;this.changed(label);return true;
+  }
+  trimHistory(){let bytes=this.past.reduce((s,x)=>s+x.json.length*2,0);while(this.past.length>this.maxHistory||bytes>this.maxHistoryBytes){const removed=this.past.shift();bytes-=removed.json.length*2;}}
+  replace(model,label='Open project'){validateModel(model);this.past.push({label,json:this.snapshot()});this.trimHistory();this.future=[];this.model=structuredClone(model);this.changed(label);}
+  undo(){if(!this.past.length)return false;const previous=this.past.pop();this.future.push({label:previous.label,json:this.snapshot()});this.model=JSON.parse(previous.json);this.changed('Undo · '+previous.label);return true;}
+  redo(){if(!this.future.length)return false;const next=this.future.pop();this.past.push({label:next.label,json:this.snapshot()});this.model=JSON.parse(next.json);this.changed('Redo · '+next.label);return true;}
+  changed(label){this.revision++;this.saved=false;let persistenceError=null;try{if(this.storage){this.storage.setItem('stratum-frame-project-v1',this.snapshot());this.saved=true;}else{persistenceError='Browser storage is unavailable. Export the project to retain edits.';}}catch(e){persistenceError=e.message;}this.dispatchEvent(new CustomEvent('change',{detail:{label,revision:this.revision,persistenceError}}));}
+  static restore(storage=storageOrNull()){try{const json=storage?.getItem('stratum-frame-project-v1');return json?parseProject(json):null;}catch{return null;}}
+}
+
+module.exports={ProjectStore};
+},
+"src/ui/renderer.js":(module,__require)=>{
+const {localAxes,localToGlobal}=__require("src/core/elements.js");
+const {position}=__require("src/core/model.js");
+const {unitFactor,displaySystems}=__require("src/core/units.js");
+const {sub,add,scale,norm,cross,dot,unit}=__require("src/core/linalg.js");
+
+const COLORS={beam:[.24,.40,.70,1],column:[.09,.53,.55,1],selected:[.99,.60,.16,1],support:[.12,.57,.36,1],grid:[.77,.81,.85,.7],ghost:[.76,.8,.84,.45],deformed:[.45,.32,.87,1],positive:[.05,.58,.62,1],negative:[.88,.31,.37,1],load:[.83,.36,.18,1]};
+function mul(a,b){const out=new Float32Array(16);for(let c=0;c<4;c++)for(let r=0;r<4;r++)for(let k=0;k<4;k++)out[c*4+r]+=a[k*4+r]*b[c*4+k];return out;}
+function viewMatrix(eye,target,up){const z=unit(sub(eye,target)),x=unit(cross(up,z)),y=cross(z,x);return new Float32Array([x[0],y[0],z[0],0,x[1],y[1],z[1],0,x[2],y[2],z[2],0,-dot(x,eye),-dot(y,eye),-dot(z,eye),1]);}
+function ortho(w,h,near,far){return new Float32Array([2/w,0,0,0,0,2/h,0,0,0,0,1/(near-far),0,0,0,near/(near-far),1]);}
+function transform(m,p){const out=[];for(let r=0;r<4;r++)out[r]=m[r]*p[0]+m[4+r]*p[1]+m[8+r]*p[2]+m[12+r];return out;}
+function boxVertices(){
+  const data=[],faces=[[[1,0,0],[[.5,-.5,-.5],[.5,.5,-.5],[.5,.5,.5],[.5,-.5,.5]]],[[-1,0,0],[[-.5,.5,-.5],[-.5,-.5,-.5],[-.5,-.5,.5],[-.5,.5,.5]]],[[0,1,0],[[.5,.5,-.5],[-.5,.5,-.5],[-.5,.5,.5],[.5,.5,.5]]],[[0,-1,0],[[-.5,-.5,-.5],[.5,-.5,-.5],[.5,-.5,.5],[-.5,-.5,.5]]],[[0,0,1],[[-.5,-.5,.5],[.5,-.5,.5],[.5,.5,.5],[-.5,.5,.5]]],[[0,0,-1],[[-.5,.5,-.5],[.5,.5,-.5],[.5,-.5,-.5],[-.5,-.5,-.5]]]];
+  for(const [n,ps]of faces)for(const i of[0,1,2,0,2,3])data.push(...ps[i],...n);return new Float32Array(data);
+}
+const shader=`
+struct Camera { vp: mat4x4<f32> };
+@group(0) @binding(0) var<uniform> camera: Camera;
+struct Out { @builtin(position) position:vec4<f32>, @location(0) color:vec4<f32>, @location(1) normal:vec3<f32> };
+@vertex fn vs(@location(0) p:vec3<f32>, @location(1) n:vec3<f32>, @location(2) c0:vec4<f32>, @location(3) c1:vec4<f32>, @location(4) c2:vec4<f32>, @location(5) c3:vec4<f32>, @location(6) color:vec4<f32>) -> Out {
+  var out:Out;
+  out.position=camera.vp*mat4x4<f32>(c0,c1,c2,c3)*vec4<f32>(p,1.0);
+  out.normal=normalize(c0.xyz)*n.x+normalize(c1.xyz)*n.y+normalize(c2.xyz)*n.z;
+  out.color=color;return out;
+}
+@fragment fn fs(input:Out)->@location(0) vec4<f32> {
+  let light=0.68+0.32*abs(dot(normalize(input.normal),normalize(vec3<f32>(0.45,-0.5,0.8))));
+  return vec4<f32>(input.color.rgb*light,input.color.a);
+}
+struct LineOut { @builtin(position) position:vec4<f32>, @location(0) color:vec4<f32> };
+@vertex fn lineVS(@location(0) p:vec3<f32>, @location(1) color:vec4<f32>)->LineOut {
+  var out:LineOut;out.position=camera.vp*vec4<f32>(p,1.0);out.color=color;return out;
+}
+@fragment fn lineFS(input:LineOut)->@location(0) vec4<f32> { return input.color; }
+`;
+let sharedDevicePromise;
+async function getGPU(){
+  if(!sharedDevicePromise)sharedDevicePromise=(async()=>{
+    if(!navigator.gpu)throw new Error('WebGPU API not available');
+    const adapter=await navigator.gpu.requestAdapter({powerPreference:'high-performance'});if(!adapter)throw new Error('No WebGPU adapter');
+    const device=await adapter.requestDevice(),format=navigator.gpu.getPreferredCanvasFormat();
+    const module=device.createShaderModule({code:shader});const compilation=await module.getCompilationInfo();
+    const errors=compilation.messages.filter(m=>m.type==='error');if(errors.length)throw new Error(errors.map(e=>e.message).join('\n'));
+    const bindLayout=device.createBindGroupLayout({entries:[{binding:0,visibility:GPUShaderStage.VERTEX,buffer:{type:'uniform'}}]});
+    const layout=device.createPipelineLayout({bindGroupLayouts:[bindLayout]});
+    const blend={color:{srcFactor:'src-alpha',dstFactor:'one-minus-src-alpha',operation:'add'},alpha:{srcFactor:'one',dstFactor:'one-minus-src-alpha',operation:'add'}};
+    const pipeline=await device.createRenderPipelineAsync({layout,vertex:{module,entryPoint:'vs',buffers:[{arrayStride:24,attributes:[{shaderLocation:0,offset:0,format:'float32x3'},{shaderLocation:1,offset:12,format:'float32x3'}]},{arrayStride:80,stepMode:'instance',attributes:[0,1,2,3,4].map((i)=>({shaderLocation:i+2,offset:i*16,format:'float32x4'}))}]},fragment:{module,entryPoint:'fs',targets:[{format,blend}]},primitive:{topology:'triangle-list',cullMode:'none'},depthStencil:{format:'depth24plus',depthWriteEnabled:true,depthCompare:'less-equal'},multisample:{count:4}});
+    const lines=await device.createRenderPipelineAsync({layout,vertex:{module,entryPoint:'lineVS',buffers:[{arrayStride:28,attributes:[{shaderLocation:0,offset:0,format:'float32x3'},{shaderLocation:1,offset:12,format:'float32x4'}]}]},fragment:{module,entryPoint:'lineFS',targets:[{format,blend}]},primitive:{topology:'line-list'},depthStencil:{format:'depth24plus',depthWriteEnabled:false,depthCompare:'less-equal'},multisample:{count:4}});
+    const vertices=boxVertices(),box=device.createBuffer({size:vertices.byteLength,usage:GPUBufferUsage.VERTEX|GPUBufferUsage.COPY_DST});device.queue.writeBuffer(box,0,vertices);
+    return {device,format,pipeline,lines,box,bindLayout,adapter};
+  })();return sharedDevicePromise;
+}
+class Viewport {
+  constructor(canvas,overlay,kind,notify=()=>{}) {
+    this.canvas=canvas;this.overlay=overlay;this.ctx=overlay.getContext('2d');this.kind=kind;this.notify=notify;
+    this.camera={azimuth:-.95,elevation:.43,center:[9,6,10],span:31,pan:[0,0]};this.backend='initializing';this.dirty=true;this.geometryDirty=true;this.draws=0;this.objects=[];this.picking=new Map();
+    this.resizeObserver=new ResizeObserver(()=>{this.resize();this.invalidate();});this.resizeObserver.observe(canvas.parentElement);
+  }
+  async init(){
+    try {
+      this.gpu=await getGPU();const {device,format,bindLayout}=this.gpu;
+      this.context=this.canvas.getContext('webgpu');if(!this.context)throw new Error('WebGPU canvas context unavailable');
+      this.context.configure({device,format,alphaMode:'opaque'});
+      this.uniform=device.createBuffer({size:64,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
+      this.bind=device.createBindGroup({layout:bindLayout,entries:[{binding:0,resource:{buffer:this.uniform}}]});
+      device.addEventListener('uncapturederror',e=>{console.error('WebGPU validation:',e.error.message);this.notify('WebGPU validation: '+e.error.message);});
+      device.lost.then(info=>{this.backend='Canvas fallback';this.notify('WebGPU device lost: '+info.message);this.gpu=null;this.invalidate();});
+      this.backend='WebGPU';
+    }catch(e){this.gpu=null;this.backend='Canvas fallback';this.notify('Canvas fallback · '+e.message);}
+    this.resize();this.invalidate();return this.backend;
+  }
+  resize(){
+    const r=this.canvas.parentElement.getBoundingClientRect();this.width=Math.max(1,r.width);this.height=Math.max(1,r.height);this.dpr=Math.min(devicePixelRatio||1,2);
+    const w=Math.max(1,Math.round(this.width*this.dpr)),h=Math.max(1,Math.round(this.height*this.dpr));
+    for(const c of[this.canvas,this.overlay])if(c.width!==w||c.height!==h){c.width=w;c.height=h;}
+    if(this.gpu&&(!this.msaa||this.tw!==w||this.th!==h)) {
+      this.msaa?.destroy();this.depth?.destroy();this.tw=w;this.th=h;
+      const {device,format}=this.gpu;this.msaa=device.createTexture({size:[w,h],sampleCount:4,format,usage:GPUTextureUsage.RENDER_ATTACHMENT});
+      this.depth=device.createTexture({size:[w,h],sampleCount:4,format:'depth24plus',usage:GPUTextureUsage.RENDER_ATTACHMENT});
+    }
+  }
+  setState(model,state){this.model=model;this.state=state;this.invalidate(true);}
+  invalidate(geometry=false){this.dirty=true;this.geometryDirty||=geometry;}
+  fit(){
+    if(!this.model)return;const points=this.model.nodes.length?this.model.nodes.map(position):[[0,0,0],[18,12,20]];
+    const min=[0,1,2].map(k=>Math.min(...points.map(p=>p[k]))),max=[0,1,2].map(k=>Math.max(...points.map(p=>p[k])));
+    this.camera.center=min.map((v,k)=>(v+max[k])/2);if(this.kind==='plan')this.camera.center[2]=this.state?.storyZ||0;this.camera.pan=[0,0];this.updateMatrix();
+    let xmin=Infinity,xmax=-Infinity,ymin=Infinity,ymax=-Infinity;
+    for(const p of points){const d=sub(p,this.camera.center),x=dot(d,this.right),y=dot(d,this.up);xmin=Math.min(xmin,x);xmax=Math.max(xmax,x);ymin=Math.min(ymin,y);ymax=Math.max(ymax,y);}
+    this.camera.span=Math.max((ymax-ymin)*1.42,(xmax-xmin)*1.42/(this.width/this.height),5);this.invalidate();
+  }
+  updateMatrix(){
+    const c=this.camera;let back,up;
+    if(this.kind==='plan'){back=[0,0,1];up=[0,1,0];}
+    else if(this.kind==='elevation'){back=[0,-1,0];up=[0,0,1];}
+    else {back=[Math.cos(c.azimuth)*Math.cos(c.elevation),Math.sin(c.azimuth)*Math.cos(c.elevation),Math.sin(c.elevation)];up=[0,0,1];}
+    this.right=unit(cross(up,back));this.up=unit(cross(back,this.right));this.back=back;
+    this.target=add(add(c.center,scale(this.right,c.pan[0])),scale(this.up,c.pan[1]));
+    const eye=add(this.target,scale(back,1000));this.matrix=mul(ortho(c.span*this.width/this.height,c.span,.01,2500),viewMatrix(eye,this.target,this.up));
+  }
+  project(p){const v=transform(this.matrix,p);return {x:(v[0]/v[3]+1)*this.width/2,y:(1-v[1]/v[3])*this.height/2,z:v[2]/v[3]};}
+  worldAt(x,y,z=this.state.storyZ){this.updateMatrix();const p=add(add(this.target,scale(this.right,(x/this.width-.5)*this.camera.span*this.width/this.height)),scale(this.up,(.5-y/this.height)*this.camera.span));if(Math.abs(this.back[2])<1e-8)return null;return sub(p,scale(this.back,(p[2]-z)/this.back[2]));}
+  zoom(delta,x=this.width/2,y=this.height/2){const before=this.worldAt(x,y,this.target?.[2]??0);this.camera.span=Math.max(.1,Math.min(1e5,this.camera.span*Math.exp(delta*.001)));const after=this.worldAt(x,y,this.target?.[2]??0);if(before&&after){const d=sub(before,after);this.camera.pan[0]+=dot(d,this.right);this.camera.pan[1]+=dot(d,this.up);}this.invalidate();}
+  pan(dx,dy){this.camera.pan[0]-=dx*this.camera.span/this.height;this.camera.pan[1]+=dy*this.camera.span/this.height;this.invalidate();}
+  orbit(dx,dy){if(this.kind!=='3d')return;this.camera.azimuth-=dx*.007;this.camera.elevation=Math.max(.05,Math.min(1.51,this.camera.elevation+dy*.005));this.invalidate();}
+  upload(name,data,usage){
+    if(!this.gpu||!data.length)return;const {device}=this.gpu;const bytes=data.byteLength;
+    if(!this[name]||this[name+'Capacity']<bytes){this[name]?.destroy();this[name+'Capacity']=2**Math.ceil(Math.log2(Math.max(256,bytes)));this[name]=device.createBuffer({size:this[name+'Capacity'],usage:usage|GPUBufferUsage.COPY_DST});}
+    device.queue.writeBuffer(this[name],0,data);
+  }
+  buildGeometry(){
+    const m=this.model,s=this.state;if(!m||!s)return;const instances=[],lines=[],objects=[],nodes=new Map(m.nodes.map(n=>[n.id,n])),sections=new Map(m.sections.map(n=>[n.id,n]));
+    const ext=Math.max(10,...m.nodes.map(n=>Math.abs(n.z))),plan=this.kind==='plan',z=s.storyZ;
+    const result=s.display==='mode'?s.results?.modes[s.modeIndex||0]:s.results?.static[s.caseId];
+    const deform=['deformed','mode'].includes(s.display)&&result;
+    const factor=deform?(s.deformationScale>0?s.deformationScale:ext*.075/Math.max(result.maxDisplacement,1e-12))*(s.animate?Math.sin(s.time*2.5):1):0;
+    const diagramIndex={axial:0,v2:1,v3:2,torsion:3,m2:4,m3:5}[s.display];
+    let maxForce=1;if(diagramIndex!==undefined&&result)for(const v of Object.values(result.members))for(let i=1+diagramIndex;i<v.diagram.length;i+=7)maxForce=Math.max(maxForce,Math.abs(v.diagram[i]));
+    const line=(a,b,color)=>lines.push(...a,...color,...b,...color);
+    const box=(a,b,width,height,color,roll=0)=>{
+      if(norm(sub(b,a))<1e-9)return;const {L,R}=localAxes(a,b,roll),c=scale(add(a,b),.5);
+      instances.push(...scale(R[0],L),0,...scale(R[1],width),0,...scale(R[2],height),0,...c,1,...color);
+    };
+    const visible=e=>!plan||(Math.abs(nodes.get(e.i).z-z)<1e-6&&Math.abs(nodes.get(e.j).z-z)<1e-6);
+    const dotBox=(p,size,color)=>box(sub(p,[size/2,0,0]),add(p,[size/2,0,0]),size,size,color);
+    const minX=Math.min(0,...m.grids.x)-1.4,maxX=Math.max(1,...m.grids.x)+1.4,minY=Math.min(0,...m.grids.y)-1.4,maxY=Math.max(1,...m.grids.y)+1.4;
+    const levels=plan?[z]:(s.grids?m.stories.map(st=>st.z):[0]);
+    if(s.grids)for(const h of levels){for(const x of m.grids.x)line([x,minY,h],[x,maxY,h],COLORS.grid);for(const y of m.grids.y)line([minX,y,h],[maxX,y,h],COLORS.grid);}
+    if(!plan&&s.grids)for(const [x,y]of[[minX,minY],[maxX,maxY]])line([x,y,0],[x,y,Math.max(0,...m.stories.map(t=>t.z))],COLORS.grid);
+    for(const e of m.elements) {
+      const ni=nodes.get(e.i),nj=nodes.get(e.j),a=position(ni),b=position(nj),sec=sections.get(e.section),isCol=Math.abs(ni.z-nj.z)>1e-6,selected=s.selection.has('e:'+e.id);
+      if(!visible(e)) {
+        if(plan&&isCol&&Math.min(ni.z,nj.z)<=z+1e-6&&Math.max(ni.z,nj.z)>=z-1e-6){const t=(z-ni.z)/(nj.z-ni.z),p=a.map((v,k)=>v+(b[k]-v)*t);dotBox(p,sec.b||.25,selected?COLORS.selected:COLORS.column);objects.push({type:'e',id:e.id,a:p,b:p});}
+        continue;
+      }
+      const color=selected?COLORS.selected:isCol?COLORS.column:COLORS.beam,w=sec.b||Math.sqrt(sec.A),h=sec.h||Math.sqrt(sec.A);
+      objects.push({type:'e',id:e.id,a,b});
+      if(deform&&result.members[e.id]) {
+        line(a,b,COLORS.ghost);const curve=result.members[e.id].curve;
+        for(let k=0;k<20;k++) {
+          const start=a.map((v,d)=>v+(b[d]-v)*k/20+curve[k*3+d]*factor),end=a.map((v,d)=>v+(b[d]-v)*(k+1)/20+curve[(k+1)*3+d]*factor);
+          box(start,end,w*.55,h*.55,selected?COLORS.selected:COLORS.deformed,e.roll);
+        }
+      }else if(diagramIndex!==undefined&&result) {
+        box(a,b,w*.35,h*.35,COLORS.ghost,e.roll);const data=result.members[e.id].diagram,{R}=localAxes(a,b,e.roll),dir=R[[2,4].includes(diagramIndex)?2:1];let last=null;
+        for(let k=0;k<data.length/7;k++) {
+          const t=data[k*7],value=data[k*7+1+diagramIndex],p=a.map((v,d)=>v+(b[d]-v)*t),q=add(p,scale(dir,value/maxForce*ext*.08)),col=value>=0?COLORS.positive:COLORS.negative;
+          if(last)line(last,q,col);if(k%2===0)line(p,q,[...col.slice(0,3),.45]);last=q;
+        }
+      }else if(s.extrude)box(a,b,w,h,color,e.roll);else {line(a,b,color);if(selected)box(a,b,.12,.12,color,e.roll);}
+      if(e.releases?.some(Boolean))for(const end of[0,1])if(e.releases.slice(end*6,end*6+6).some(Boolean)){const t=end?.96:.04,p=a.map((v,k)=>v+(b[k]-v)*t);dotBox(p,.18,[.92,.35,.21,1]);}
+    }
+    m.nodes.forEach((n,index)=>{
+      if(plan&&Math.abs(n.z-z)>1e-6)return;const p=position(n),selected=s.selection.has('n:'+n.id);objects.push({type:'n',id:n.id,a:p,b:p});
+      if(selected||s.joints)dotBox(p,selected?.23:.11,selected?COLORS.selected:[.29,.39,.50,1]);
+      if(n.support.some(Boolean)&&s.supports){const p0=sub(p,[0,0,.15]);box(sub(p0,[.48,0,0]),add(p0,[.48,0,0]),.8,.12,COLORS.support);line(p,add(p,[-.33,0,-.45]),COLORS.support);line(p,add(p,[.33,0,-.45]),COLORS.support);}
+      if(s.display==='reactions'&&result&&n.support.some(Boolean)) {
+        const f=Array.from(result.reactions.slice(index*6,index*6+3)),mag=norm(f);if(mag>1e-5)this.arrow(line,p,add(p,scale(f,ext*.09/mag)),COLORS.positive);
+      }
+    });
+    if(s.display==='loads') {
+      const cases=s.results?.static[s.caseId]?s.caseId:s.caseId;
+      const factors=m.combinations.find(c=>c.id===cases)?.factors||{[cases]:1};
+      for(const load of m.loads)if(factors[load.case]) {
+        const f=factors[load.case];if(load.type==='nodal') {const n=nodes.get(load.node);if(plan&&Math.abs(n.z-z)>1e-6)continue;const v=scale(load.value.slice(0,3),f),mag=norm(v);if(mag>0){const p=position(n);this.arrow(line,sub(p,scale(v,1.6/mag)),p,COLORS.load);}}
+        else {const e=m.elements.find(e=>e.id===load.element);if(!visible(e))continue;const a=position(nodes.get(e.i)),b=position(nodes.get(e.j));const v=scale(load.system==='global'?load.value:localToGlobal(localAxes(a,b,e.roll).R,load.value),f),mag=norm(v);if(!mag)continue;for(const t of load.type==='point'?[load.position]:[.12,.32,.52,.72,.92]){const p=a.map((v,k)=>v+(b[k]-v)*t);this.arrow(line,sub(p,scale(v,1.1/mag)),p,COLORS.load);}}
+      }
+    }
+    if(s.drawPreview?.length===2)line(s.drawPreview[0],s.drawPreview[1],COLORS.selected);
+    this.instances=new Float32Array(instances);this.lines=new Float32Array(lines);this.objects=objects;this.draws=(instances.length?1:0)+(lines.length?1:0);this.displayFactor=factor;
+    if(this.gpu){this.upload('instanceBuffer',this.instances,GPUBufferUsage.VERTEX);this.upload('lineBuffer',this.lines,GPUBufferUsage.VERTEX);}
+  }
+  arrow(line,a,b,color){line(a,b,color);const d=sub(b,a),len=norm(d);if(!len)return;let side=cross(unit(d),[0,0,1]);if(norm(side)<.1)side=[1,0,0];side=scale(unit(side),len*.12);const p=sub(b,scale(d,.2));line(b,add(p,side),color);line(b,sub(p,side),color);}
+  rebuildPicking(){
+    this.picking.clear();const cell=48;
+    for(const o of this.objects){const a=this.project(o.a),b=this.project(o.b);o.screenA=a;o.screenB=b;
+      const x0=Math.floor((Math.min(a.x,b.x)-10)/cell),x1=Math.floor((Math.max(a.x,b.x)+10)/cell),y0=Math.floor((Math.min(a.y,b.y)-10)/cell),y1=Math.floor((Math.max(a.y,b.y)+10)/cell);
+      for(let y=Math.max(-1,y0);y<=Math.min(Math.ceil(this.height/cell),y1);y++)for(let x=Math.max(-1,x0);x<=Math.min(Math.ceil(this.width/cell),x1);x++){const key=x+','+y;if(!this.picking.has(key))this.picking.set(key,[]);this.picking.get(key).push(o);}
+    }
+  }
+  pick(x,y,nodesOnly=false){
+    let found=null,best=12;for(const o of this.picking.get(Math.floor(x/48)+','+Math.floor(y/48))||[]) {
+      if(nodesOnly&&o.type!=='n')continue;const a=o.screenA,b=o.screenB,dx=b.x-a.x,dy=b.y-a.y,t=Math.max(0,Math.min(1,((x-a.x)*dx+(y-a.y)*dy)/(dx*dx+dy*dy||1))),dist=Math.hypot(x-a.x-t*dx,y-a.y-t*dy)+(o.type==='e'?2:0);
+      if(dist<best){best=dist;found=o;}
+    }return found;
+  }
+  render(){
+    if(!this.dirty||!this.model)return;this.dirty=false;this.updateMatrix();
+    if(this.geometryDirty){this.buildGeometry();this.geometryDirty=false;}
+    if(this.gpu&&this.msaa) {
+      const {device,pipeline,lines,box}=this.gpu;device.queue.writeBuffer(this.uniform,0,this.matrix);
+      const encoder=device.createCommandEncoder(),pass=encoder.beginRenderPass({colorAttachments:[{view:this.msaa.createView(),resolveTarget:this.context.getCurrentTexture().createView(),loadOp:'clear',clearValue:{r:.98,g:.987,b:.993,a:1},storeOp:'discard'}],depthStencilAttachment:{view:this.depth.createView(),depthLoadOp:'clear',depthClearValue:1,depthStoreOp:'discard'}});
+      pass.setBindGroup(0,this.bind);
+      if(this.instances?.length){pass.setPipeline(pipeline);pass.setVertexBuffer(0,box);pass.setVertexBuffer(1,this.instanceBuffer);pass.draw(36,this.instances.length/20);}
+      if(this.lines?.length){pass.setPipeline(lines);pass.setVertexBuffer(0,this.lineBuffer);pass.draw(this.lines.length/7);}
+      pass.end();device.queue.submit([encoder.finish()]);
+    }
+    this.rebuildPicking();this.drawOverlay();
+  }
+  drawOverlay(){
+    const c=this.ctx;c.setTransform(this.dpr,0,0,this.dpr,0,0);c.clearRect(0,0,this.width,this.height);
+    if(!this.gpu){
+      c.fillStyle='#f8fafc';c.fillRect(0,0,this.width,this.height);
+      if(this.lines)for(let i=0;i<this.lines.length;i+=14){const a=this.project(Array.from(this.lines.slice(i,i+3))),b=this.project(Array.from(this.lines.slice(i+7,i+10)));c.strokeStyle=`rgba(${this.lines[i+3]*255},${this.lines[i+4]*255},${this.lines[i+5]*255},${this.lines[i+6]})`;c.lineWidth=1;c.beginPath();c.moveTo(a.x,a.y);c.lineTo(b.x,b.y);c.stroke();}
+      if(this.instances){const ids=Array.from({length:this.instances.length/20},(_,i)=>i).sort((a,b)=>this.project(Array.from(this.instances.slice(a*20+12,a*20+15))).z-this.project(Array.from(this.instances.slice(b*20+12,b*20+15))).z).reverse();
+        for(const index of ids){const i=index*20,center=Array.from(this.instances.slice(i+12,i+15)),d=Array.from(this.instances.slice(i,i+3)),a=this.project(sub(center,scale(d,.5))),b=this.project(add(center,scale(d,.5))),rgb=Array.from(this.instances.slice(i+16,i+19),v=>Math.round(v*255));c.strokeStyle=`rgb(${rgb.join(',')})`;c.lineWidth=Math.max(1.2,norm(Array.from(this.instances.slice(i+4,i+7)))*this.height/this.camera.span);c.lineCap='square';c.beginPath();c.moveTo(a.x,a.y);c.lineTo(b.x,b.y);c.stroke();}
+      }
+    }
+    const m=this.model,s=this.state,plan=this.kind==='plan';c.font='10px system-ui';c.textAlign='center';c.textBaseline='middle';
+    const label=(text,p,color='#8091a4',bubble=false)=>{const a=this.project(p);if(a.x<5||a.x>this.width-5||a.y<8||a.y>this.height-8)return;if(bubble){c.fillStyle='#fff';c.strokeStyle='#cad3de';c.lineWidth=1;c.beginPath();c.arc(a.x,a.y,9,0,Math.PI*2);c.fill();c.stroke();}c.fillStyle=color;c.fillText(text,a.x,a.y);};
+    if(s.grids){const z=plan?s.storyZ:0;for(let i=0;i<m.grids.x.length;i++)label(String.fromCharCode(65+i),[m.grids.x[i],Math.min(...m.grids.y)-1.4,z],'#7d8ba0',true);for(let i=0;i<m.grids.y.length;i++)label(String(i+1),[Math.min(...m.grids.x)-1.4,m.grids.y[i],z],'#7d8ba0',true);}
+    if(!plan&&s.grids){c.textAlign='left';for(const story of m.stories){const p=this.project([Math.min(...m.grids.x)-1.4,Math.max(...m.grids.y)+1.4,story.z]);c.fillStyle='#8390a1';c.fillText(story.name,p.x-42,p.y);}c.textAlign='center';}
+    if(s.labels)for(const o of this.objects){if(o.type==='e'){const a=o.screenA,b=o.screenB;c.fillStyle='#677991';c.fillText(o.id,(a.x+b.x)/2,(a.y+b.y)/2-7);}else{c.fillStyle='#657b91';c.fillText(o.id,o.screenA.x+12,o.screenA.y-8);}}
+    if(s.display==='reactions'){const r=s.results?.static[s.caseId];if(r)for(let i=0;i<m.nodes.length;i++){const n=m.nodes[i];if(n.support.some(Boolean)&&(!plan||Math.abs(n.z-s.storyZ)<1e-6)){const p=this.project(position(n));c.fillStyle='#267a5b';c.fillText((r.reactions[i*6+2]/unitFactor(displaySystems[s.units].force)).toFixed(1)+' '+displaySystems[s.units].force,p.x,p.y+20);}}}
+    if(s.selection.size)for(const o of this.objects)if(s.selection.has(o.type+':'+o.id)){const p=o.screenA;c.fillStyle='#a66512';c.font='bold 10px system-ui';c.fillText(o.id,p.x+15,p.y-15);}
+    if(s.boxSelection&&s.boxSelection.viewport===this){const b=s.boxSelection;c.fillStyle='rgba(64,103,222,.08)';c.strokeStyle='#5877d3';c.setLineDash([4,3]);c.fillRect(b.x,b.y,b.w,b.h);c.strokeRect(b.x,b.y,b.w,b.h);c.setLineDash([]);}
+    if(s.snapPoint&&plan){const p=this.project(s.snapPoint);c.strokeStyle='#dc9629';c.lineWidth=1.5;c.strokeRect(p.x-5,p.y-5,10,10);}
+    const ox=44,oy=this.height-39;c.lineWidth=1.5;
+    for(const [axis,color,name]of[[[1,0,0],'#c97670','X'],[[0,1,0],'#5f9d7c','Y'],[[0,0,1],'#6d8dcc','Z']]){const dx=dot(axis,this.right)*24,dy=-dot(axis,this.up)*24;if(Math.abs(dx)+Math.abs(dy)<1)continue;c.strokeStyle=color;c.beginPath();c.moveTo(ox,oy);c.lineTo(ox+dx,oy+dy);c.stroke();c.fillStyle=color;c.fillText(name,ox+dx*1.3,oy+dy*1.3);}
+    c.textAlign='right';c.font='10px system-ui';c.fillStyle='#98a4b3';c.fillText(this.backend==='WebGPU'?`${this.draws} GPU draws · instanced`:'Canvas 2D compatibility renderer',this.width-14,this.height-16);
+  }
+  dispose(){this.resizeObserver.disconnect();this.msaa?.destroy();this.depth?.destroy();this.instanceBuffer?.destroy();this.lineBuffer?.destroy();this.uniform?.destroy();}
+}
+
+module.exports={Viewport};
+},
+"src/ui/dialogs.js":(module,__require)=>{
+const {icon,hydrateIcons}=__require("src/ui/icons.js");
+const {quantity,unitFactor,displaySystems}=__require("src/core/units.js");
+const {emptyModel,createBuilding,uniqueId,rectangularSection,validateModel,parseProject}=__require("src/core/model.js");
+const {DOFS,LOCAL_DOFS}=__require("src/core/elements.js");
+const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const input=(id,value,extra='')=>`<input id="${id}" value="${esc(value)}" ${extra}>`;
+const opts=(items,selected)=>items.map(item=>`<option value="${esc(item.id)}" ${item.id===selected?'selected':''}>${esc(item.name||item.id)}</option>`).join('');
+class Dialogs {
+  constructor(app){
+    this.app=app;this.root=document.querySelector('#dialog');this.content=document.querySelector('#dialog-content');
+    this.root.querySelector('#dialog-submit').onclick=()=>this.submit();
+    this.root.querySelector('form').onsubmit=e=>{if(e.submitter?.value==='cancel')return;e.preventDefault();this.submit();};
+    this.root.addEventListener('click',e=>{if(e.target===this.root){const r=this.root.getBoundingClientRect();if(e.clientX<r.left||e.clientX>r.right||e.clientY<r.top||e.clientY>r.bottom)this.root.close();}});
+  }
+  get model(){return this.app.store.model;}
+  get units(){return displaySystems[this.app.state.units];}
+  val(id){return this.root.querySelector('#'+id)?.value??'';}
+  checked(id){return !!this.root.querySelector('#'+id)?.checked;}
+  open(title,html,apply=null,{button='Apply changes',note='Changes invalidate existing results.',wide=false}={}){
+    this.apply=apply;document.querySelector('#dialog-title').textContent=title;this.content.innerHTML=html;document.querySelector('#dialog-note').textContent=note;document.querySelector('#dialog-error').textContent='';
+    const b=document.querySelector('#dialog-submit');b.textContent=apply?button:'Close';b.disabled=false;this.root.style.width=wide?'min(1080px,96vw)':'';if(!this.root.open)this.root.showModal();
+    this.content.scrollTop=0;hydrateIcons(this.root);
+  }
+  async submit(){
+    const b=document.querySelector('#dialog-submit');b.disabled=true;
+    try{if(this.apply)await this.apply();this.root.close();}catch(e){document.querySelector('#dialog-error').textContent=e.message;}
+    finally{b.disabled=false;}
+  }
+  newModel(){
+    this.open('Create a structural model',`<p>Generate a connected three-dimensional frame with editable stories, section assignments, rigid diaphragms and example gravity and lateral loads.</p><div class="dialog-grid"><label class="full">Project name${input('new-name','Untitled frame')}</label><label>Number of stories${input('new-stories',6,'type="number" min="1" max="16"')}</label><label>Typical story height (${this.units.length})${input('new-height',3.4/unitFactor(this.units.length))}</label><label>Bays in X${input('new-x',3,'type="number" min="1" max="8"')}</label><label>Bays in Y${input('new-y',2,'type="number" min="1" max="8"')}</label><label>X bay width (${this.units.length})${input('new-bx',6/unitFactor(this.units.length))}</label><label>Y bay width (${this.units.length})${input('new-by',6/unitFactor(this.units.length))}</label><label class="checkbox full"><input type="checkbox" id="new-diaphragms" checked> Assign a rigid horizontal diaphragm at each floor</label><label class="checkbox full"><input type="checkbox" id="new-empty"> Start with an empty model instead (definitions retained)</label></div><div class="note-box warning-box">Example loads and combinations are illustrative. They are not a site-specific loading specification or a design-code implementation.</div>`,()=>{
+      const m=this.checked('new-empty')?emptyModel():createBuilding({name:this.val('new-name'),stories:Number(this.val('new-stories')),baysX:Number(this.val('new-x')),baysY:Number(this.val('new-y')),height:quantity(this.val('new-height'),'length',this.units.length),bayX:quantity(this.val('new-bx'),'length',this.units.length),bayY:quantity(this.val('new-by'),'length',this.units.length),diaphragms:this.checked('new-diaphragms')});m.name=this.val('new-name').trim()||'Untitled frame';this.app.store.replace(m,'Create model');this.app.state.storyZ=Math.max(...m.stories.map(s=>s.z));this.app.refresh(true);
+    },{button:'Create model',note:'The current model remains available through Undo.'});
+  }
+  definition(key,title,columns,makeDefault,note='',after=null){
+    let data=structuredClone(this.model[key]);
+    const render=()=>{
+      const body=`<p>${note}</p><div style="overflow:auto"><table class="definition-table"><thead><tr>${columns.map(c=>`<th>${esc(c.label)}</th>`).join('')}<th></th></tr></thead><tbody>${data.map((row,i)=>`<tr data-edit-row="${i}">${columns.map(c=>`<td class="${c.wide?'wide':''}">${c.options?`<select data-field="${c.key}">${opts(typeof c.options==='function'?c.options():c.options,row[c.key])}</select>`:`<input data-field="${c.key}" value="${esc(c.show?c.show(row[c.key],row):row[c.key]??'')}" ${c.readonly?'readonly':''}>`}</td>`).join('')}<td><button type="button" class="delete-row" data-remove="${i}" title="Delete row">×</button></td></tr>`).join('')}</tbody></table></div><button type="button" class="dialog-add" id="add-definition">${icon('plus',13)} Add ${esc(title.toLowerCase().replace(/s$/,''))}</button>`;
+      this.content.innerHTML=body;
+      this.content.querySelector('#add-definition').onclick=()=>{collect();data.push(makeDefault(data));render();};
+      this.content.querySelectorAll('[data-remove]').forEach(b=>b.onclick=()=>{collect();data.splice(Number(b.dataset.remove),1);render();});
+    };
+    const collect=()=>{for(const tr of this.content.querySelectorAll('[data-edit-row]')){const row=data[Number(tr.dataset.editRow)];for(const c of columns){const v=tr.querySelector(`[data-field="${c.key}"]`).value;row[c.key]=c.parse?c.parse(v,row):v;}}};
+    this.open(title,'',()=>{collect();const old=structuredClone(this.model[key]);this.app.store.transact('Edit '+title.toLowerCase(),m=>{m[key]=data;if(after)after(m,old,data);});},{wide:columns.length>6});render();
+  }
+  materials(){this.definition('materials','Materials',[
+    {key:'id',label:'ID'},{key:'name',label:'Name',wide:true},{key:'E',label:'E (GPa)',show:v=>v/1e9,parse:v=>quantity(v,'stress','GPa')},{key:'nu',label:'Poisson ν',parse:v=>quantity(v,'dimensionless')},{key:'density',label:'Density (kg/m³)',parse:v=>quantity(v,'density','kg/m3')}
+  ],rows=>({id:nextId(rows,'MAT'),name:'New elastic material',E:200e9,nu:.3,density:7850}),'Isotropic, linear elastic properties. G is derived from E and ν. Density supplies element mass; self-weight is controlled separately by each load case. Unit suffixes such as “200 GPa” are accepted.');}
+  sections(){this.definition('sections','Frame sections',[
+    {key:'id',label:'ID'},{key:'name',label:'Name',wide:true},{key:'material',label:'Material',options:()=>this.model.materials},
+    ...[['b','Width b','m','length'],['h','Depth h','m','length'],['A','A','m2','area'],['Iy','I2','m4','inertia'],['Iz','I3','m4','inertia'],['J','J','m4','inertia']].map(([key,label,u,dim])=>({key,label:`${label} (${u})`,parse:v=>quantity(v,dim,u)}))
+  ],rows=>rectangularSection(nextId(rows,'SEC'),'New 300 × 600',.3,.6,this.model.materials[0].id),'<b>Analysis uses A, I2, I3 and J directly.</b> Width and depth control the rendered section only; changing them here does not recompute stiffness. Define → Rectangular section calculates all properties together. I2 = ∫z²dA, I3 = ∫y²dA. J is the Saint-Venant torsion constant.');}
+  rectangle(){this.open('Create rectangular section',`<div class="dialog-grid"><label>Section ID${input('sec-id',uniqueId(this.model,'sections','SEC'))}</label><label>Name${input('sec-name','Rectangular section')}</label><label>Width along local 2 (m)${input('sec-b','.3')}</label><label>Depth along local 3 (m)${input('sec-h','.6')}</label><label class="full">Material<select id="sec-mat">${opts(this.model.materials)}</select></label></div><div class="note-box">A = bh; I2 = bh³/12; I3 = hb³/12. J uses the standard rectangular Saint-Venant engineering approximation, with the longer side as a and shorter side as c. This is not a thin-wall or warping formulation.</div>`,()=>{const b=quantity(this.val('sec-b'),'length','m'),h=quantity(this.val('sec-h'),'length','m');if(b<=0||h<=0)throw new Error('Positive section dimensions are required.');this.app.store.transact('Create rectangular section',m=>m.sections.push(rectangularSection(this.val('sec-id').trim(),this.val('sec-name').trim(),b,h,this.val('sec-mat'))));});}
+  stories(){this.definition('stories','Stories',[
+    {key:'id',label:'ID'},{key:'name',label:'Story name',wide:true},{key:'z',label:`Elevation (${this.units.length})`,show:v=>v/unitFactor(this.units.length),parse:v=>quantity(v,'length',this.units.length)}
+  ],rows=>({id:nextId(rows,'S'),name:'Story '+rows.length,z:Math.max(0,...rows.map(r=>r.z))+3.4}),'Changing an existing story elevation moves joints originally on that elevation. Adding or deleting a story row changes reference levels only; it does not create or delete framing. Use Draw tools or the building template for new geometry.',(m,old,rows)=>{
+    const changes=old.map(s=>[s.z,rows.find(n=>n.id===s.id)?.z??s.z]);for(const n of m.nodes){const c=changes.find(([z])=>Math.abs(n.z-z)<1e-7);if(c)n.z=c[1];}m.stories.sort((a,b)=>a.z-b.z);
+  });}
+  grids(){this.open('Grid systems',`<p>Grid coordinates are snap/reference lines. Editing them does not move existing joints.</p><div class="dialog-grid"><label class="full">X grid coordinates (${this.units.length}), comma-separated${input('grid-x',this.model.grids.x.map(v=>v/unitFactor(this.units.length)).join(', '))}</label><label class="full">Y grid coordinates (${this.units.length}), comma-separated${input('grid-y',this.model.grids.y.map(v=>v/unitFactor(this.units.length)).join(', '))}</label></div>`,()=>{const parse=id=>this.val(id).split(',').map(v=>quantity(v.trim(),'length',this.units.length)).sort((a,b)=>a-b);this.app.store.transact('Edit grids',m=>m.grids={x:parse('grid-x'),y:parse('grid-y')});});}
+  cases(){this.definition('cases','Load cases',[
+    {key:'id',label:'Case ID'},{key:'name',label:'Name',wide:true},{key:'selfWeight',label:'Self-weight multiplier',parse:v=>quantity(v,'dimensionless')}
+  ],rows=>({id:nextId(rows,'LC'),name:'New linear static case',selfWeight:0}),'Each case is solved independently with the same stiffness matrix. A self-weight multiplier of 1 applies −9.80665 ρA N/m in global Z to every frame. Added joint mass is inertia only; apply its gravity load explicitly.');}
+  combinations(){this.definition('combinations','Load combinations',[
+    {key:'id',label:'ID'},{key:'name',label:'Name',wide:true},{key:'factors',label:'CASE:factor, CASE:factor',wide:true,show:v=>Object.entries(v).map(([k,x])=>k+':'+x).join(', '),parse:v=>{const f={};for(const item of v.split(',').map(s=>s.trim()).filter(Boolean)){const a=item.split(':');if(a.length!==2)throw new Error('Use CASE:factor syntax, for example DEAD:1.2, LIVE:1.6.');f[a[0].trim()]=quantity(a[1].trim(),'dimensionless');}return f;}}
+  ],rows=>({id:nextId(rows,'COMB'),name:'New linear combination',factors:Object.fromEntries(this.model.cases.slice(0,1).map(c=>[c.id,1]))}),'Linear superposition only. Factors may be positive or negative. Nested combinations, envelopes and code-generated factors are not implemented. Example combinations are illustrative.');}
+  diaphragms(){this.definition('diaphragms','Rigid diaphragms',[
+    {key:'id',label:'ID'},{key:'name',label:'Name',wide:true},{key:'nodes',label:'Joint IDs (comma-separated)',wide:true,show:v=>v.join(', '),parse:v=>v.split(',').map(s=>s.trim()).filter(Boolean)}
+  ],rows=>({id:nextId(rows,'D'),name:'Rigid diaphragm',nodes:this.model.nodes.filter(n=>Math.abs(n.z-this.app.state.storyZ)<1e-6&&!n.support[0]&&!n.support[1]&&!n.support[5]).map(n=>n.id)}),'Exact in-plane UX, UY and RZ constraints at a horizontal floor. UZ, RX and RY remain independent. At least two distinct, coplanar joints are required. No shell stiffness, gravity slab action, semi-rigid behavior or automatic floor mass is added.');}
+  supports(){
+    const selected=this.app.selectedNodes(),first=selected[0];
+    this.open('Assign joint restraints',`<p>Restraints are exact zero-displacement constraints in global coordinates. Select joints in a view or enter their IDs below.</p><div class="dialog-grid"><label class="full">Joint IDs${input('support-targets',selected.map(n=>n.id).join(', '),'placeholder="J1, J2, J3"')}</label></div><div class="dialog-inline"><button type="button" class="secondary-button" id="support-fixed">Fixed</button><button type="button" class="secondary-button" id="support-pinned">Pinned</button><button type="button" class="secondary-button" id="support-free">Free</button></div><div class="support-flags">${DOFS.map((d,i)=>`<label><input type="checkbox" id="support-${i}" ${first?.support[i]?'checked':''}>${d}</label>`).join('')}</div><div class="note-box">Pinned means UX, UY, UZ restrained and all rotations free. The solver reports mechanisms rather than adding stabilization. Horizontal/RZ supports cannot be assigned to rigid-diaphragm joints in this build.</div>`,()=>{const ids=this.val('support-targets').split(',').map(v=>v.trim()).filter(Boolean);if(!ids.length)throw new Error('Select or enter at least one joint.');this.app.store.transact('Assign supports',m=>{for(const id of ids){const n=m.nodes.find(n=>n.id===id);if(!n)throw new Error('Unknown joint '+id);n.support=DOFS.map((_,i)=>this.checked('support-'+i));}});});
+    for(const [id,flags]of[['fixed',Array(6).fill(true)],['pinned',[true,true,true,false,false,false]],['free',Array(6).fill(false)]])this.root.querySelector('#support-'+id).onclick=()=>flags.forEach((v,i)=>this.root.querySelector('#support-'+i).checked=v);
+  }
+  releases(){
+    const selected=this.app.selectedElements(),first=selected[0];
+    this.open('Frame end releases',`<p>Released components refer to the element’s local axes. Each released end displacement becomes an independent internal DOF; stiffness and consistent mass are retained without penalty springs.</p><div class="dialog-grid"><label class="full">Frame IDs${input('release-targets',selected.map(e=>e.id).join(', '),'placeholder="F1, F2"')}</label></div><div class="release-grid"><span></span><strong>End I</strong><strong>End J</strong>${LOCAL_DOFS.map((d,k)=>`<span>${['Axial U1','Shear U2','Shear U3','Torsion R1','Bending R2','Bending R3'][k]}</span>${[k,k+6].map(i=>`<label><input type="checkbox" id="release-${i}" ${first?.releases?.[i]?'checked':''}> Release</label>`).join('')}`).join('')}</div><div class="note-box warning-box">A double-ended axial or torsional release can introduce a free member rigid-body mode. Unsupported or singular combinations are rejected by the solver. Partial-fixity springs are not included.</div>`,()=>{const ids=this.val('release-targets').split(',').map(v=>v.trim()).filter(Boolean);if(!ids.length)throw new Error('Select or enter at least one frame.');this.app.store.transact('Assign end releases',m=>{for(const id of ids){const e=m.elements.find(e=>e.id===id);if(!e)throw new Error('Unknown frame '+id);e.releases=Array.from({length:12},(_,i)=>this.checked('release-'+i));}});});
+  }
+  load(){
+    const ns=this.app.selectedNodes(),es=this.app.selectedElements(),type=ns.length?'nodal':'udl';
+    this.open('Assign structural loads',`<p>Forces are algebraic components. Negative global Z acts downward. Member point loads use a relative position strictly between 0 and 1.</p><div class="dialog-grid"><label>Load case<select id="load-case">${opts(this.model.cases,this.app.state.caseId)}</select></label><label>Load type<select id="load-type"><option value="nodal" ${type==='nodal'?'selected':''}>Joint forces / moments</option><option value="udl" ${type==='udl'?'selected':''}>Uniform member load</option><option value="point">Member point force</option></select></label><label class="full">Target <span id="load-target-label">joint / frame IDs</span>${input('load-targets',(ns.length?ns:es).map(n=>n.id).join(', '),'placeholder="Select objects or enter IDs"')}</label><label id="load-axis-label">Coordinate system<select id="load-system"><option value="global">Global X, Y, Z</option><option value="local">Local 1, 2, 3</option></select></label><label id="load-position-label">Relative position a/L${input('load-position','.5')}</label><label><span id="load-x-label">FX</span>${input('load-v0','0')}</label><label><span id="load-y-label">FY</span>${input('load-v1','0')}</label><label><span id="load-z-label">FZ</span>${input('load-v2','-10')}</label><label class="load-moment">MX (${this.units.moment})${input('load-v3','0')}</label><label class="load-moment">MY (${this.units.moment})${input('load-v4','0')}</label><label class="load-moment">MZ (${this.units.moment})${input('load-v5','0')}</label><label class="checkbox full"><input type="checkbox" id="load-replace"> Replace existing loads of this type and case on these targets</label></div>`,()=>{
+      const type=this.val('load-type'),loadCase=this.val('load-case'),ids=this.val('load-targets').split(',').map(v=>v.trim()).filter(Boolean);if(!ids.length)throw new Error('Select or enter at least one target.');
+      const dim=type==='udl'?'lineLoad':'force',values=Array.from({length:type==='nodal'?6:3},(_,k)=>quantity(this.val('load-v'+k),k<3?dim:'moment',k<3?this.units[dim]:this.units.moment));
+      this.app.store.transact('Assign '+type+' load',m=>{for(const id of ids){if(!(type==='nodal'?m.nodes:m.elements).some(e=>e.id===id))throw new Error('Unknown '+(type==='nodal'?'joint ':'frame ')+id);if(this.checked('load-replace'))m.loads=m.loads.filter(l=>!(l.type===type&&l.case===loadCase&&(l.node===id||l.element===id)));m.loads.push({id:uniqueId(m,'loads','L'),case:loadCase,type,...(type==='nodal'?{node:id}:{element:id,system:this.val('load-system')}),...(type==='point'?{position:quantity(this.val('load-position'),'dimensionless')}:{ }),value:values});}});this.app.state.caseId=loadCase;this.app.refresh();
+    },{button:'Assign loads'});
+    const update=()=>{const t=this.val('load-type'),dim=t==='udl'?'lineLoad':'force';this.root.querySelector('#load-system').disabled=t==='nodal';if(t==='nodal')this.root.querySelector('#load-system').value='global';this.root.querySelector('#load-position-label').classList.toggle('hidden',t!=='point');this.root.querySelectorAll('.load-moment').forEach(el=>el.classList.toggle('hidden',t!=='nodal'));this.root.querySelector('#load-target-label').textContent=t==='nodal'?'joint IDs':'frame IDs';for(const[k,a]of[[0,'x'],[1,'y'],[2,'z']])this.root.querySelector('#load-'+a+'-label').textContent=`${t==='udl'?'q':'F'}${this.val('load-system')==='global'?a.toUpperCase():k+1} (${this.units[dim]})`;};
+    this.root.querySelector('#load-type').onchange=()=>{this.root.querySelector('#load-targets').value=(this.val('load-type')==='nodal'?ns:es).map(n=>n.id).join(', ');update();};this.root.querySelector('#load-system').onchange=update;update();
+  }
+  loadTable(){this.definition('loads','Assigned loads',[
+    {key:'id',label:'ID'},{key:'case',label:'Case',options:()=>this.model.cases},{key:'type',label:'Type',readonly:true},{key:'target',label:'Target ID',show:(_,r)=>r.node||r.element,parse:(v,r)=>{if(r.type==='nodal')r.node=v.trim();else r.element=v.trim();return undefined;}},
+    {key:'system',label:'Axes',options:[{id:'global',name:'Global'},{id:'local',name:'Local'}]},
+    {key:'value',label:'SI vector: N, N/m, Nm',wide:true,show:v=>v.join(', '),parse:v=>v.split(',').map(x=>quantity(x.trim(),'dimensionless'))},
+    {key:'position',label:'a/L (point only)',show:v=>v??'',parse:(v,r)=>r.type==='point'?quantity(v,'dimensionless'):undefined}
+  ],rows=>({id:nextId(rows,'L'),case:this.model.cases[0].id,type:'udl',element:this.model.elements[0]?.id||'',system:'global',value:[0,0,-1000]}),'This advanced table uses canonical SI numbers: joint [FX,FY,FZ,MX,MY,MZ] in N/Nm; member [q1,q2,q3] in N/m or [F1,F2,F3] in N. Use Assign Loads for dimension-aware entry in the selected display units.');}
+  json(){this.open('Model JSON · advanced editor',`<p>Canonical SI units only: metres, newtons, pascals, kilograms, radians. References and dimensions are validated atomically before the project changes.</p><textarea id="json-model" class="json-editor" spellcheck="false">${esc(JSON.stringify(this.model,null,2))}</textarea>`,()=>this.app.store.replace(parseProject(this.val('json-model')),'Apply model JSON'),{wide:true,button:'Validate & apply'});}
+  viewOptions(){const s=this.app.state;this.open('Display settings',`<div class="dialog-grid"><label>Deformation magnification (0 = automatic)${input('view-scale',s.deformationScale)}</label><label>Requested modes (1–24)${input('view-modes',this.model.settings.modes,'type="number" min="1" max="24"')}</label>${[['joints','Show joint markers'],['labels','Show object labels'],['grids','Show grid and story lines'],['supports','Show restraints'],['extrude','Extrude section geometry'],['snap','Snap to grids and joints']].map(([key,label])=>`<label class="checkbox"><input type="checkbox" id="view-${key}" ${s[key]?'checked':''}>${label}</label>`).join('')}<label class="checkbox full"><input type="checkbox" id="view-modal" ${this.model.settings.modal?'checked':''}> Include modal analysis in the next run</label></div><div class="note-box">Automatic magnification uses the maximum sampled computed displacement, not the actual physical scale. Modal vectors are mass-normalized; animated amplitudes are illustrative. Static interpolation includes full-span UDL and interior point-load particular solutions. Modal interpolation uses finite-element kinematics.</div>`,()=>{const magnification=quantity(this.val('view-scale'),'dimensionless');if(magnification<0)throw new Error('Magnification must be nonnegative.');s.deformationScale=magnification;for(const key of['joints','labels','grids','supports','extrude','snap'])s[key]=this.checked('view-'+key);this.app.store.transact('Analysis settings',m=>m.settings={modes:Number(this.val('view-modes')),modal:this.checked('view-modal')});this.app.refresh();},{note:'View-only changes preserve analysis results.'});}
+  validate(){let warnings;try{warnings=validateModel(this.model);}catch(e){this.open('Model validation failed',`<div class="note-box warning-box">${esc(e.message)}</div>`,null,{note:'No changes were applied.'});return;}this.open('Model validation',`<div class="note-box">${icon('check',16)} <b>Geometry and data checks passed.</b><br>${this.model.nodes.length} joints, ${this.model.elements.length} frames, ${this.model.diaphragms.length} rigid diaphragms.</div><p>This checks data, positive properties, connectivity references, lengths and assignment compatibility. Global instability is checked during matrix factorization; a valid file is not proof of a stable or adequate structure.</p>${warnings.map(w=>`<div class="note-box warning-box">${esc(w)}</div>`).join('')}`,null,{note:'Run analysis for stiffness and equilibrium diagnostics.'});}
+  help(){this.open('Analysis scope & working guide',`
+    <div class="note-box warning-box"><b>Research / verification workbench, not a certified structural design package.</b> Do not use its outputs as the sole basis for construction, approval, or safety-critical decisions. Independent engineering review and broader validation are required.</div>
+    <h3>Modeling workflow</h3><p>Create a frame template, define materials and sections, edit stories and grids, assign supports and loads, then run analysis. Click a member or joint to inspect and edit it. Shift-click adds to the selection. Draw beams by clicking two snapped points in Plan View; columns connect the active story to the story below. Coincident coordinates do not merge imported joints; intersecting members connect only through shared joint IDs.</p>
+    <h3>Analysis implemented</h3><p>Linear elastic, small-displacement, prismatic 3D Euler–Bernoulli frames: axial deformation, biaxial bending and Saint-Venant torsion. Six physical DOFs per joint. Exact horizontal rigid diaphragms. Independent internal release DOFs. Full symmetric sparse assembly, reverse Cuthill–McKee reordering, diagonal equilibration and skyline LDLᵀ. No penalty stiffness. Generalized eigenanalysis uses consistent mass, inverse subspace iteration and Rayleigh–Ritz extraction.</p>
+    <h3>Loads, mass & results</h3><p>Joint forces/moments, full-span uniform line loads, interior concentrated member forces, member self-weight and linear combinations. Self-weight is a load-case multiplier, not the modal mass source. Mass comes from material density plus explicit joint mass. Joint masses do not automatically add dead load. Static curves include within-element particular solutions. Member-force diagrams use section equilibrium and explicitly resolve point-load jumps.</p>
+    <h3>Not implemented</h3><p>No shell or solid elements, slab/wall action, semi-rigid floors, shear-flexible Timoshenko effects, warping, offsets, springs, settlements, P–Δ, buckling, nonlinear hinges, cracked-section updates, response spectra, time history, damping, seismic/wind code generation, code checks or ETABS file interoperability. Rectangular rendering does not imply reinforced-concrete design. Non-prismatic members need explicit segmentation and assigned section properties.</p>
+    <h3>Diagnostics & limits</h3><p>Scaled nonpositive/small pivots fail the static run; the pivot tolerance is 10⁻¹². Static relative force residual limit: 10⁻⁷. Modal normwise residual target: 10⁻⁸. Exact zero-stiffness, zero-mass and unforced DOFs are excluded with a warning. Modal failure is reported separately and does not discard valid static results. Maximum input: 2,000 joints, 6,000 frames, 24 requested modes; the skyline has a 24-million-coefficient memory cap. These are guardrails, not performance guarantees.</p>
+    <h3>Navigation & shortcuts</h3><p><span class="help-key">B</span> beam · <span class="help-key">C</span> column · <span class="help-key">J</span> joint · <span class="help-key">M</span> move joint · <span class="help-key">Esc</span> select / cancel draw · <span class="help-key">F</span> fit · <span class="help-key">F5</span> analyze · <span class="help-key">Delete</span> delete selection · <span class="help-key">Ctrl Z / Y</span> undo / redo · <span class="help-key">Ctrl S / O</span> save / open. Right-click opens object actions. In 3D, drag empty space to orbit; Shift-drag box-selects; middle/right drag pans. In plan, drag empty space to pan. Pinch zoom and two-finger pan are supported.</p>
+    <h3>Source & references</h3><p>See the bundled README.md, docs/ANALYSIS.md and docs/verification-results.json. Numerical formulation references: TU Delft’s Euler–Bernoulli beam chapter; OpenSees elasticBeamColumn documentation. Workspace conventions reference CSI’s ETABS modeling, diaphragm and release documentation. The implementation is independent and not affiliated with CSI.</p>
+    `,null,{button:'Close',note:'All project data remains in this browser unless you export it.',wide:true});}
+  async benchmarks(){
+    this.open('Analytical verification suite','<p>Running the same solver used by the application against analytical and invariant checks…</p>',null,{note:'Live calculation · not a saved success indicator.'});
+    await new Promise(r=>setTimeout(r,30));
+    const {runBenchmarks}=await Promise.resolve(__require("tests/benchmarks.mjs"));const tests=runBenchmarks(),passed=tests.filter(t=>t.passed).length;
+    this.open('Analytical verification suite',`<div class="note-box ${passed<tests.length?'warning-box':''}"><b>${passed} / ${tests.length} checks passed in this browser.</b> These benchmarks validate the listed cases, not general engineering suitability.</div><table class="bench-table"><thead><tr><th>Benchmark</th><th>Result</th><th>Relative error / diagnostic</th></tr></thead><tbody>${tests.map(t=>`<tr><td>${esc(t.name)}</td><td class="${t.passed?'success-text':'error-text'}">${t.passed?'PASS':'FAIL'}</td><td>${esc(t.error||t.relativeError?.toExponential(3)||t.actual||'checked')}</td></tr>`).join('')}</tbody></table>`,null,{wide:true,note:'Full tolerances and machine-readable output are included in the source archive.'});
+  }
+}
+function nextId(rows,prefix){const ids=new Set(rows.map(r=>r.id));let i=1;while(ids.has(prefix+i))i++;return prefix+i;}
+
+module.exports={esc,Dialogs};
+},
+"src/ui/icons.js":(module,__require)=>{
+const paths={
+  cube:'M12 3 3 8v9l9 5 9-5V8l-9-5Zm0 0v10m-9-5 9 5 9-5m-9 5v9',
+  new:'M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6Zm0 0v6h6M12 11v7m-3-3.5h6',
+  open:'M3 7V5a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2v2M3 7h5l2 3h12l-3 10H3L1 7h2Z',
+  save:'M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h12l4 4v12a2 2 0 0 1-2 2ZM7 3v6h9V3M7 21v-8h10v8',
+  undo:'M3 7v6h6M3 13a8 8 0 1 1 2 6',redo:'M21 7v6h-6m6 0a8 8 0 1 0-2 6',
+  select:'m5 3 14 10-7 1-3 7L5 3Z',beam:'m3 18 14-14 4 4L7 22l-4-4Zm0 0 4 4m10-18 4 4',
+  column:'M8 2h8v20H8zM5 2h14M5 22h14M8 6h8M8 18h8',joint:'M12 3v18M3 12h18M8 8h8v8H8z',
+  grid:'M3 3h18v18H3zM3 9h18M3 15h18M9 3v18M15 3v18',story:'m3 7 9-4 9 4-9 4-9-4Zm0 5 9 4 9-4M3 17l9 4 9-4',
+  material:'M12 3 3 8v8l9 5 9-5V8L12 3ZM3 8l9 5 9-5m-9 5v8',section:'M5 3h14v4h-5v10h5v4H5v-4h5V7H5z',
+  support:'M12 4v5m0 0-8 11h16L12 9ZM2 22h20M5 22l-2 2m7-2-2 2m7-2-2 2m7-2-2 2',
+  release:'M2 12h7m6 0h7M9 12a3 3 0 1 0 6 0 3 3 0 1 0-6 0',
+  load:'M4 3v13m-3-3 3 3 3-3M12 3v13m-3-3 3 3 3-3M20 3v13m-3-3 3 3 3-3M2 21h20',
+  play:'m7 4 14 8-14 8V4Z',pause:'M7 4h3v16H7zM14 4h3v16h-3z',stop:'M5 5h14v14H5z',
+  check:'m5 12 4 4L19 6',deform:'M3 20V4h18M3 20C15 20 8 4 21 4',
+  chart:'M3 3v18h18M6 15l5-7 4 4 6-9',mode:'M2 12c3-12 6-12 10 0s7 12 10 0',
+  fit:'M8 3H3v5m13-5h5v5M3 16v5h5m13-5v5h-5M8 8l8 8m0-8-8 8',
+  eye:'M2 12s3-7 10-7 10 7 10 7-3 7-10 7S2 12 2 12Zm7 0a3 3 0 1 0 6 0 3 3 0 1 0-6 0',
+  plus:'M12 5v14M5 12h14',minus:'M5 12h14',chevron:'m9 5 7 7-7 7',down:'m6 9 6 6 6-6',close:'m6 6 12 12M6 18 18 6',
+  search:'M10.5 3a7.5 7.5 0 1 0 0 15 7.5 7.5 0 1 0 0-15ZM16 16l5 5',settings:'M12 8a4 4 0 1 0 0 8 4 4 0 1 0 0-8ZM9 2l-1 4-4 1-2 4 3 3-1 4 4 3 4-2 4 2 4-3-1-4 3-3-2-4-4-1-1-4H9Z',
+  table:'M3 4h18v16H3zM3 9h18M3 14h18M9 4v16M15 4v16',download:'M12 3v12m-5-5 5 5 5-5M4 16v5h16v-5',
+  folder:'M3 5h7l2 3h9v12H3V5Z',info:'M12 2a10 10 0 1 0 0 20 10 10 0 1 0 0-20ZM12 11v6m0-10v1',
+  warning:'m12 3 11 18H1L12 3Zm0 6v5m0 3v1',trash:'M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7m4-7v7',
+  move:'M12 2v20M2 12h20m-13-7 3-3 3 3m-6 14 3 3 3-3M5 9l-3 3 3 3m14-6 3 3-3 3',
+  rotate:'M20 8a8 8 0 1 0 0 8M20 3v5h-5',split:'M3 20 10 13m4-3 7-7M3 4l7 6m4 4 7 6M9 12a3 3 0 1 0 6 0 3 3 0 1 0-6 0',
+  code:'m8 6-6 6 6 6m8-12 6 6-6 6m-2-15-4 18',bolt:'m13 2-9 12h7l-1 8 10-13h-7l1-7Z',
+  lock:'M5 10h14v11H5zM8 10V6a4 4 0 0 1 8 0v4',arrow:'M4 12h16m-6-6 6 6-6 6',layers:'m12 3 10 5-10 5L2 8l10-5Zm-9 10 9 5 9-5M3 18l9 5 9-5',
+  report:'M6 3h12v18H6zM9 7h6M9 11h6M9 15h4',diaphragm:'m3 9 12-5 7 6-12 5-7-6Zm7 6v5m12-10v5M3 9v5l7 6 12-5'
+};
+function icon(name,size=18){return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="${paths[name]||paths.cube}"/></svg>`;}
+function hydrateIcons(root=document){root.querySelectorAll('[data-icon]').forEach(e=>e.innerHTML=icon(e.dataset.icon,Number(e.dataset.size)||18));}
+
+module.exports={icon,hydrateIcons};
+},
+"tests/benchmarks.mjs":(module,__require)=>{
+const {emptyModel,rectangularSection,createBuilding,validateModel}=__require("src/core/model.js");
+const {analyze,assemble}=__require("src/core/analysis.js");
+const {localAxes,frameMatrices,memberDisplacement,sectionForces}=__require("src/core/elements.js");
+const {quantity}=__require("src/core/units.js");
+const {dot,norm}=__require("src/core/linalg.js");
+function beam({segments=1,L=3,E=210e9,density=7850,b=.1,h=.2}={}) {
+  const m=emptyModel();m.name='Cantilever benchmark';m.cases=[{id:'TEST',name:'Test',selfWeight:0}];m.combinations=[];m.settings={modal:false,modes:3};
+  m.materials=[{id:'MAT',name:'Elastic',E,nu:.3,density}];m.sections=[rectangularSection('SEC','Rectangular',b,h,'MAT')];
+  m.nodes=Array.from({length:segments+1},(_,i)=>({id:'N'+i,x:i*L/segments,y:0,z:0,mass:0,support:Array(6).fill(i===0)}));
+  m.elements=Array.from({length:segments},(_,i)=>({id:'E'+i,i:'N'+i,j:'N'+(i+1),section:'SEC',roll:0,releases:Array(12).fill(false)}));return m;
+}
+const relative=(actual,expected)=>Math.abs(actual-expected)/Math.max(Math.abs(expected),1e-30);
+function runBenchmarks() {
+  const report=[];
+  function test(name,fn){try{const values=fn();report.push({name,passed:true,...values});}catch(e){report.push({name,passed:false,error:e.message});}}
+  function check(actual,expected,tolerance=1e-8){const error=relative(actual,expected);if(!(error<tolerance))throw new Error(`Got ${actual}; expected ${expected}; relative error ${error} > ${tolerance}`);return {actual,expected,relativeError:error,tolerance};}
+  function throws(fn){let thrown=false;try{fn();}catch{thrown=true;}if(!thrown)throw new Error('Expected analysis to reject this model.');return {expected:'rejected',actual:'rejected'};}
+  for(const [axis,inertia]of [[1,'Iz'],[2,'Iy']])test(`Cantilever tip bending, global ${axis===1?'Y':'Z'}`,()=>{
+    const m=beam(),P=12000,L=3,v=Array(6).fill(0);v[axis]=-P;m.loads=[{id:'P',case:'TEST',type:'nodal',node:'N1',value:v}];const r=analyze(m).static.TEST;
+    check(r.reactions[axis],P);return check(r.u[6+axis],-P*L**3/(3*m.materials[0].E*m.sections[0][inertia]));
+  });
+  test('Cantilever axial extension PL/EA',()=>{const m=beam();m.loads=[{id:'P',case:'TEST',type:'nodal',node:'N1',value:[10000,0,0,0,0,0]}];return check(analyze(m).static.TEST.u[6],10000*3/(210e9*m.sections[0].A));});
+  test('Cantilever torsion TL/GJ',()=>{const m=beam();m.loads=[{id:'P',case:'TEST',type:'nodal',node:'N1',value:[0,0,0,2500,0,0]}];return check(analyze(m).static.TEST.u[9],2500*3/(210e9/(2*1.3)*m.sections[0].J));});
+  test('Cantilever UDL qL⁴/8EI and moment equilibrium',()=>{const m=beam();m.loads=[{id:'q',case:'TEST',type:'udl',element:'E0',system:'global',value:[0,0,-4000]}];const r=analyze(m).static.TEST;check(r.reactions[2],12000);check(r.reactions[4],-18000);return check(r.u[8],-4000*3**4/(8*210e9*m.sections[0].Iy));});
+  test('Simply supported UDL midspan 5qL⁴/384EI',()=>{const m=beam();for(const n of m.nodes)n.support=[true,true,true,true,false,false];m.loads=[{id:'q',case:'TEST',type:'udl',element:'E0',system:'global',value:[0,0,-4000]}];const r=analyze(m).static.TEST;check(r.reactions[2],6000);return check(r.members.E0.curve[10*3+2],-5*4000*3**4/(384*210e9*m.sections[0].Iy));});
+  test('Fixed/fixed UDL interior qL⁴/384EI, zero free DOFs',()=>{const m=beam();for(const n of m.nodes)n.support=Array(6).fill(true);m.loads=[{id:'q',case:'TEST',type:'udl',element:'E0',system:'global',value:[0,0,-4000]}];const r=analyze(m).static.TEST;check(r.reactions[4],-4000*9/12);return check(r.members.E0.curve[32],-4000*3**4/(384*210e9*m.sections[0].Iy));});
+  test('Fixed/fixed concentrated midpoint PL³/192EI',()=>{const m=beam();for(const n of m.nodes)n.support=Array(6).fill(true);m.loads=[{id:'p',case:'TEST',type:'point',element:'E0',system:'global',position:.5,value:[0,0,-12000]}];return check(analyze(m).static.TEST.members.E0.curve[32],-12000*3**3/(192*210e9*m.sections[0].Iy));});
+  test('Interior point load cantilever tip Pa²(3L−a)/6EI',()=>{const m=beam(),a=1.2,P=12000;m.loads=[{id:'p',case:'TEST',type:'point',element:'E0',system:'global',position:a/3,value:[0,0,-P]}];return check(analyze(m).static.TEST.u[8],-P*a*a*(9-a)/(6*210e9*m.sections[0].Iy));});
+  test('Double-ended bending releases retain exact mass and zero moments',()=>{const m=beam();for(const n of m.nodes)n.support=Array(6).fill(true);m.elements[0].releases[4]=m.elements[0].releases[10]=true;m.loads=[{id:'q',case:'TEST',type:'udl',element:'E0',system:'global',value:[0,0,-4000]}];const r=analyze(m).static.TEST;if(Math.abs(r.members.E0.endForces[4])+Math.abs(r.members.E0.endForces[10])>1e-7)throw new Error('Released moments are not zero.');return check(r.members.E0.curve[32],-5*4000*81/(384*210e9*m.sections[0].Iy));});
+  test('Oblique member orientation, axial projection',()=>{const m=beam(),a=[1,2,2],u=a.map(v=>v/3);Object.assign(m.nodes[1],{x:1,y:2,z:2});m.loads=[{id:'p',case:'TEST',type:'nodal',node:'N1',value:[...u.map(v=>10000*v),0,0,0]}];const r=analyze(m).static.TEST;return check(dot(r.u.slice(6,9),u),10000*3/(210e9*m.sections[0].A));});
+  test('Member stiffness and mass symmetry',()=>{const m=beam(),{K,M}=frameMatrices(3,m.sections[0],m.materials[0]);for(const A of[K,M])for(let i=0;i<12;i++)for(let j=0;j<12;j++)if(A[i*12+j]!==A[j*12+i])throw new Error('Matrix is asymmetric.');return {actual:'symmetric',expected:'symmetric'};});
+  test('Consistent mass reproduces rigid translation mass',()=>{const m=beam(),{M}=frameMatrices(3,m.sections[0],m.materials[0]),x=new Float64Array(12);x[2]=x[8]=1;let mass=0;for(let i=0;i<12;i++)for(let j=0;j<12;j++)mass+=x[i]*M[i*12+j]*x[j];return check(mass,7850*m.sections[0].A*3);});
+  test('Cantilever fundamental frequency, 12 elements, consistent mass',()=>{const m=beam({segments:12});m.settings={modal:true,modes:3};const r=analyze(m);if(r.modalError)throw new Error(r.modalError);const expected=1.875104068711961**2/(2*Math.PI*3**2)*Math.sqrt(210e9*Math.min(m.sections[0].Iy,m.sections[0].Iz)/(7850*m.sections[0].A));return check(r.modes[0].frequency,expected,2e-5);});
+  test('Modal eigenpairs meet residual tolerance',()=>{const m=createBuilding({stories:2,baysX:1,baysY:1});const r=analyze(m);if(r.modalError)throw new Error(r.modalError);const max=Math.max(...r.modes.map(m=>m.residual));if(max>1e-8)throw new Error('Eigenpair residual exceeded tolerance.');return {actual:max,expected:'< 1e-8',tolerance:1e-8};});
+  test('Exact diaphragm kinematics and global equilibrium',()=>{const m=createBuilding({stories:2,baysX:2,baysY:1});const r=analyze(m,{modal:false}).static.WINDX;const d=m.diaphragms[1],ns=d.nodes.map(id=>m.nodes.findIndex(n=>n.id===id)),a=ns[0];for(const b of ns){const x=m.nodes[b].x-m.nodes[a].x,y=m.nodes[b].y-m.nodes[a].y;const dx=r.u[b*6]-r.u[a*6]+y*r.u[a*6+5],dy=r.u[b*6+1]-r.u[a*6+1]-x*r.u[a*6+5];if(Math.abs(dx)+Math.abs(dy)>1e-12)throw new Error('Diaphragm compatibility failed.');}if(norm(r.equilibrium)>1e-5)throw new Error('Global force/moment equilibrium failed.');return {actual:norm(r.equilibrium),expected:'< 1e-5 N / Nm'};});
+  test('Linear combination displacement superposition',()=>{const m=createBuilding({stories:1,baysX:1,baysY:1});const r=analyze(m,{modal:false}).static;let error=0;for(let i=0;i<r.ULS.u.length;i++)error=Math.max(error,Math.abs(r.ULS.u[i]-1.2*r.DEAD.u[i]-1.6*r.LIVE.u[i]));if(error>1e-12)throw new Error('Superposition failed.');return {actual:error,expected:'< 1e-12 m / rad'};});
+  test('Member-force diagrams satisfy end equilibrium with UDL + point',()=>{const m=beam();m.loads=[{id:'q',case:'TEST',type:'udl',element:'E0',system:'local',value:[100,-2000,-4000]},{id:'p',case:'TEST',type:'point',element:'E0',system:'local',position:.3,value:[1000,2000,-12000]}];const r=analyze(m).static.TEST.members.E0;const end=sectionForces(r.endForces,r.q,r.points,3,3);let error=0;for(let i=0;i<6;i++)error=Math.max(error,Math.abs(end[i]-r.endForces[i+6]));if(error>1e-7)throw new Error('Member force endpoint equilibrium failed.');return {actual:error,expected:'< 1e-7 N / Nm'};});
+  test('Unrestrained rigid-body mechanism rejected',()=>{const m=beam();m.nodes[0].support=Array(6).fill(false);return throws(()=>analyze(m));});
+  test('Loaded released zero-stiffness joint rotation rejected',()=>{const m=beam();m.elements[0].releases[11]=true;m.loads=[{id:'p',case:'TEST',type:'nodal',node:'N1',value:[0,0,0,0,0,100]}];return throws(()=>analyze(m));});
+  test('Zero-length element rejected',()=>{const m=beam();m.nodes[1].x=0;return throws(()=>analyze(m));});
+  test('Dimensionally incompatible user quantity rejected',()=>throws(()=>quantity('3 kN','length','m')));
+  test('Unit conversion is SI-consistent',()=>check(quantity('200 GPa','stress','Pa'),quantity('200000 MPa','stress','Pa')));
+  test('Persistence round-trip preserves calculations',()=>{const m=beam();m.loads=[{id:'p',case:'TEST',type:'nodal',node:'N1',value:[0,0,-1000,0,0,0]}];return check(analyze(JSON.parse(JSON.stringify(m))).static.TEST.u[8],analyze(m).static.TEST.u[8]);});
+  test('Missing references rejected on import',()=>{const m=beam();m.elements[0].section='missing';return throws(()=>validateModel(m));});
+  test('Massless frame with tip mass: three finite condensed modes',()=>{const m=beam({density:0});m.nodes[1].mass=100;m.settings={modal:true,modes:6};const r=analyze(m);if(r.modalError)throw new Error(r.modalError);if(r.modes.length!==3)throw new Error('Expected exactly three positive-mass modes.');return check(r.modes[0].frequency,Math.sqrt(3*210e9*Math.min(m.sections[0].Iy,m.sections[0].Iz)/(3**3*100))/(2*Math.PI),1e-8);});
+  test('Self-weight reaction equals material mass times gravity',()=>{const m=beam();m.cases[0].selfWeight=1;return check(analyze(m).static.TEST.reactions[2],7850*m.sections[0].A*3*9.80665);});
+  test('Zero-mass modal warning preserves valid static results',()=>{const m=beam({density:0});m.settings={modal:true,modes:3};m.loads=[{id:'P',case:'TEST',type:'nodal',node:'N1',value:[0,0,-1000,0,0,0]}];const r=analyze(m);if(!r.modalError||r.modes.length)throw new Error('Expected explicit unavailable modal result.');return check(r.static.TEST.u[8],-1000*27/(3*210e9*m.sections[0].Iy));});
+  test('Section roll rotates unequal bending stiffness',()=>{const m=beam();m.elements[0].roll=Math.PI/2;m.loads=[{id:'P',case:'TEST',type:'nodal',node:'N1',value:[0,0,-1000,0,0,0]}];return check(analyze(m).static.TEST.u[8],-1000*27/(3*210e9*m.sections[0].Iz));});
+  test('Unsupported diaphragm support conflict rejected',()=>{const m=createBuilding({stories:1,baysX:1,baysY:1});m.nodes.find(n=>n.id===m.diaphragms[0].nodes[0]).support[0]=true;return throws(()=>analyze(m));});
+  test('Reserved identifier rejected before object-key assembly',()=>{const m=beam();m.cases[0].id='__proto__';return throws(()=>validateModel(m));});
+  test('Duplicate reference story elevations rejected',()=>{const m=beam();m.stories.push({id:'DUPLICATE',name:'Duplicate',z:0});return throws(()=>validateModel(m));});
+  return report;
+}
+
+module.exports={beam,runBenchmarks};
+},
+"src/core/analysis.js":(module,__require)=>{
+const {AnalysisError,SparseBuilder,SkylineLDLT,lowestModes,dot,norm,axpy,cross}=__require("src/core/linalg.js");
+const {DOFS,LOCAL_DOFS,localAxes,frameMatrices,uniformLoad,pointLoad,mat12Vec,globalToLocal,localToGlobal,sectionForces,memberDisplacement}=__require("src/core/elements.js");
+const {validateModel,position,GRAVITY}=__require("src/core/model.js");
+
+const addMapped=(out,map,value)=>{for(const [i,c]of map)out[i]+=c*value;};
+const evalMap=(map,x)=>{let r=0;for(const [i,c]of map)r+=c*x[i];return r;};
+function combineMaps(terms) {const a=new Map();for(const [map,mul]of terms)for(const [i,v]of map)a.set(i,(a.get(i)||0)+v*mul);return [...a].filter(([,v])=>Math.abs(v)>1e-14);}
+function addMappedMatrix(builder,A,B) {
+  for(let r=0;r<12;r++)for(let s=0;s<12;s++) {
+    const v=A[r*12+s];if(!v)continue;
+    for(const [i,ci]of B[r])for(const [j,cj]of B[s])builder.add(i,j,ci*cj*v);
+  }
+}
+function makeConstraints(model) {
+  const labels=[],nodeMaps=[],diaph=new Map(),nodes=new Map(model.nodes.map(n=>[n.id,n]));
+  const newDof=label=>{labels.push(label);return labels.length-1;};
+  for(const d of model.diaphragms) {
+    const cx=d.nodes.reduce((s,id)=>s+nodes.get(id).x,0)/d.nodes.length,cy=d.nodes.reduce((s,id)=>s+nodes.get(id).y,0)/d.nodes.length;
+    const master=[newDof(`${d.id}:UX`),newDof(`${d.id}:UY`),newDof(`${d.id}:RZ`)];
+    for(const id of d.nodes)diaph.set(id,{cx,cy,master});
+  }
+  for(const n of model.nodes) {
+    const d=diaph.get(n.id),maps=Array.from({length:6},()=>[]);
+    for(let k=0;k<6;k++) {
+      if(d&&[0,1,5].includes(k)) {
+        maps[k]=k===0?[[d.master[0],1],[d.master[2],-(n.y-d.cy)]]:k===1?[[d.master[1],1],[d.master[2],n.x-d.cx]]:[[d.master[2],1]];
+        maps[k]=maps[k].filter(([,c])=>Math.abs(c)>1e-14);
+      }else if(!n.support[k])maps[k]=[[newDof(`${n.id}:${DOFS[k]}`),1]];
+    }
+    nodeMaps.push(maps);
+  }
+  return {labels,nodeMaps,newDof};
+}
+function gatherLoads(model,elements,nodeIndex,nodeMaps,n) {
+  const cases={};for(const c of model.cases)cases[c.id]={id:c.id,F:new Float64Array(n),nodal:new Float64Array(model.nodes.length*6),members:{}};
+  const members=new Map(elements.map(e=>[e.id,e]));
+  const memberData=(c,id)=>c.members[id]??(c.members[id]={q:[0,0,0],points:[],f:new Float64Array(12)});
+  for(const c of model.cases)if(c.selfWeight)for(const e of elements) {
+    const data=memberData(cases[c.id],e.id),q=globalToLocal(e.R,[0,0,-GRAVITY*e.material.density*e.section.A*c.selfWeight]);
+    for(let k=0;k<3;k++)data.q[k]+=q[k];
+  }
+  for(const load of model.loads) {
+    const c=cases[load.case];
+    if(load.type==='nodal') {
+      const index=nodeIndex.get(load.node);for(let k=0;k<6;k++){addMapped(c.F,nodeMaps[index][k],load.value[k]);c.nodal[index*6+k]+=load.value[k];}
+    }else {
+      const e=members.get(load.element),data=memberData(c,load.element),v=load.system==='local'?load.value:globalToLocal(e.R,load.value);
+      if(load.type==='udl')for(let k=0;k<3;k++)data.q[k]+=v[k];
+      else data.points.push({position:load.position,value:[...v]});
+    }
+  }
+  for(const c of Object.values(cases))for(const e of elements) {
+    const data=memberData(c,e.id);data.f=uniformLoad(data.q,e.L);
+    for(const p of data.points)axpy(data.f,pointLoad(p.value,p.position,e.L),1);
+    for(let k=0;k<12;k++)addMapped(c.F,e.B[k],data.f[k]);
+  }
+  return cases;
+}
+function assemble(model,onProgress=()=>{}) {
+  const warnings=validateModel(model);
+  if(!model.nodes.length||!model.elements.length)throw new AnalysisError('Add joints and frame members before analysis.');
+  const connected=new Set(model.elements.flatMap(e=>[e.i,e.j]));
+  for(const n of model.nodes)if(!connected.has(n.id))throw new AnalysisError(`Joint ${n.id} is disconnected. Connect it to a frame or delete it.`);
+  onProgress({stage:'Mapping DOFs and constraints'});
+  const {labels,nodeMaps,newDof}=makeConstraints(model),nodeIndex=new Map(model.nodes.map((n,i)=>[n.id,i]));
+  const sections=new Map(model.sections.map(s=>[s.id,s])),materials=new Map(model.materials.map(m=>[m.id,m]));
+  const elements=[];
+  for(const e of model.elements) {
+    const i=nodeIndex.get(e.i),j=nodeIndex.get(e.j),a=position(model.nodes[i]),b=position(model.nodes[j]),{L,R}=localAxes(a,b,e.roll||0);
+    const section=sections.get(e.section),material=materials.get(section.material),{K,M}=frameMatrices(L,section,material);
+    if([...K,...M].some(v=>!Number.isFinite(v)))throw new AnalysisError(`Frame ${e.id} produced a nonfinite stiffness or mass coefficient. Review units and magnitudes.`);
+    const B=[];
+    for(let k=0;k<12;k++) {
+      const end=k<6?i:j,group=k%6<3?0:3,axis=k%3;
+      B.push(e.releases?.[k]?[[newDof(`${e.id}:${k<6?'I':'J'} released ${LOCAL_DOFS[k%6]}`),1]]:combineMaps([0,1,2].map(t=>[nodeMaps[end][group+t],R[axis][t]])));
+    }
+    elements.push({id:e.id,i,j,a,b,L,R,section,material,K,M,B,releases:e.releases||Array(12).fill(false)});
+  }
+  const n=labels.length,Kb=new SparseBuilder(n),Mb=new SparseBuilder(n),influence=Array.from({length:3},()=>new Float64Array(n));let totalMass=0;
+  onProgress({stage:'Assembling sparse stiffness and mass',dofs:n});
+  for(const e of elements) {
+    addMappedMatrix(Kb,e.K,e.B);addMappedMatrix(Mb,e.M,e.B);totalMass+=e.material.density*e.section.A*e.L;
+    for(let dir=0;dir<3;dir++) {
+      const rigid=new Float64Array(12);for(let k=0;k<3;k++)rigid[k]=rigid[k+6]=e.R[k][dir];
+      const force=mat12Vec(e.M,rigid);for(let k=0;k<12;k++)addMapped(influence[dir],e.B[k],force[k]);
+    }
+  }
+  model.nodes.forEach((node,index)=>{
+    const mass=node.mass||0;totalMass+=mass;
+    for(let k=0;k<6;k++) {
+      const v=k<3?mass:(node.massInertia?.[k-3]||0),map=nodeMaps[index][k];
+      for(const [i,a]of map)for(const [j,b]of map)Mb.add(i,j,a*b*v);
+      if(k<3)addMapped(influence[k],map,mass);
+    }
+  });
+  const cases=gatherLoads(model,elements,nodeIndex,nodeMaps,n),active=[],inactive=[];
+  for(let i=0;i<n;i++) {
+    const d=Kb.diagonal(i);
+    if(d===0) {
+      if(Mb.diagonal(i)!==0||Object.values(cases).some(c=>c.F[i]!==0))throw new AnalysisError(`Unrestrained DOF ${labels[i]} has no stiffness but carries load or mass.`,{dof:labels[i]});
+      inactive.push(labels[i]);
+    }else active.push(i);
+  }
+  if(inactive.length)warnings.push(`${inactive.length} exactly zero-stiffness, zero-mass, unforced DOFs were excluded: ${inactive.slice(0,10).join(', ')}${inactive.length>10?' …':''}. No artificial stiffness was added.`);
+  const inverse=new Int32Array(n).fill(-1);active.forEach((v,i)=>inverse[v]=i);
+  const remap=map=>map.filter(([i])=>inverse[i]>=0).map(([i,v])=>[inverse[i],v]);
+  for(const maps of nodeMaps)for(let k=0;k<6;k++)maps[k]=remap(maps[k]);
+  for(const e of elements)for(let k=0;k<12;k++)e.B[k]=remap(e.B[k]);
+  for(const c of Object.values(cases))c.F=Float64Array.from(active,i=>c.F[i]);
+  const K=Kb.finish(active),M=Mb.finish(active);
+  return {model,K,M,nodeMaps,elements,cases,labels:active.map(i=>labels[i]),influence:influence.map(f=>Float64Array.from(active,i=>f[i])),totalMass,warnings,
+    stats:{joints:model.nodes.length,frames:elements.length,physicalDOFs:model.nodes.length*6,activeDOFs:active.length,internalDOFs:elements.reduce((s,e)=>s+e.releases.filter(Boolean).length,0),excludedDOFs:inactive.length,totalMass}};
+}
+function physicalDisplacement(asm,x) {
+  const u=new Float64Array(asm.model.nodes.length*6);
+  asm.nodeMaps.forEach((maps,i)=>maps.forEach((map,k)=>u[i*6+k]=evalMap(map,x)));return u;
+}
+function addEndToGlobal(array,e,local,factor=1) {
+  for(let end=0;end<2;end++)for(let group=0;group<2;group++) {
+    const v=localToGlobal(e.R,Array.from(local.slice(end*6+group*3,end*6+group*3+3)));
+    for(let k=0;k<3;k++)array[(end?e.j:e.i)*6+group*3+k]+=v[k]*factor;
+  }
+}
+function resultant(nodes,forces) {
+  const f=[0,0,0],m=[0,0,0];
+  nodes.forEach((node,i)=>{const p=Array.from(forces.slice(i*6,i*6+3)),c=cross(position(node),p);for(let k=0;k<3;k++){f[k]+=p[k];m[k]+=forces[i*6+3+k]+c[k];}});return [...f,...m];
+}
+function recover(asm,c,x,residual) {
+  const {model,elements}=asm,u=physicalDisplacement(asm,x),balance=Float64Array.from(c.nodal,v=>-v),applied=Float64Array.from(c.nodal),members={};let maxDisplacement=0;
+  for(let i=0;i<model.nodes.length;i++)maxDisplacement=Math.max(maxDisplacement,Math.hypot(u[i*6],u[i*6+1],u[i*6+2]));
+  for(const e of elements) {
+    const data=c.members[e.id],localU=Float64Array.from(e.B,map=>evalMap(map,x)),end=mat12Vec(e.K,localU);axpy(end,data.f,-1);
+    addEndToGlobal(balance,e,end);addEndToGlobal(applied,e,data.f);
+    const stations=[];for(let k=0;k<=20;k++)stations.push(k/20);for(const p of data.points){stations.push(Math.max(0,p.position-1e-8),p.position);}stations.sort((a,b)=>a-b);
+    const diagram=new Float64Array(stations.length*7),curve=new Float64Array(21*3);
+    stations.forEach((t,k)=>{diagram[k*7]=t;diagram.set(sectionForces(end,data.q,data.points,t*e.L,e.L),k*7+1);});
+    for(let k=0;k<=20;k++) {
+      const d=localToGlobal(e.R,memberDisplacement(localU,k/20,e.L,e.section,e.material,data.q,data.points));curve.set(d,k*3);maxDisplacement=Math.max(maxDisplacement,norm(d));
+    }
+    members[e.id]={endForces:end,localU,q:data.q,points:data.points,diagram,curve};
+  }
+  const reactions=new Float64Array(balance.length),constraints=new Float64Array(balance.length);
+  model.nodes.forEach((node,i)=>node.support.forEach((fixed,k)=>{if(fixed)reactions[i*6+k]=balance[i*6+k];else constraints[i*6+k]=balance[i*6+k];}));
+  const appliedResultant=resultant(model.nodes,applied),reactionResultant=resultant(model.nodes,reactions),equilibrium=appliedResultant.map((v,i)=>v+reactionResultant[i]);
+  return {id:c.id,u,reactions,constraintForces:constraints,members,maxDisplacement,residual,appliedResultant,reactionResultant,equilibrium};
+}
+function combine(asm,comb,solutions) {
+  const n=asm.K.n,c={id:comb.id,F:new Float64Array(n),nodal:new Float64Array(asm.model.nodes.length*6),members:{}},x=new Float64Array(n);
+  for(const e of asm.elements)c.members[e.id]={q:[0,0,0],points:[],f:new Float64Array(12)};
+  for(const [id,factor]of Object.entries(comb.factors)) {
+    axpy(x,solutions[id],factor);const source=asm.cases[id];axpy(c.F,source.F,factor);axpy(c.nodal,source.nodal,factor);
+    for(const e of asm.elements) {
+      const target=c.members[e.id],data=source.members[e.id];axpy(target.f,data.f,factor);
+      for(let k=0;k<3;k++)target.q[k]+=data.q[k]*factor;
+      for(const p of data.points)target.points.push({position:p.position,value:p.value.map(v=>v*factor)});
+    }
+  }
+  const r=asm.K.mul(x);axpy(r,c.F,-1);return recover(asm,c,x,norm(r)/Math.max(norm(c.F),1));
+}
+function analyze(model,options={},onProgress=()=>{}) {
+  const start=performance.now(),asm=assemble(model,onProgress);onProgress({stage:'Factoring equilibrated skyline matrix',dofs:asm.K.n});
+  const factor=asm.K.n?new SkylineLDLT(asm.K,asm.labels):null;
+  const results={},solutions={};
+  for(const c of Object.values(asm.cases)) {
+    onProgress({stage:'Solving static case '+c.id});
+    const solved=factor?factor.solveRefined(c.F):{x:new Float64Array(0),residual:0};solutions[c.id]=solved.x;results[c.id]=recover(asm,c,solved.x,solved.residual);
+  }
+  for(const comb of model.combinations)results[comb.id]=combine(asm,comb,solutions);
+  const modes=[];let modalError=null;
+  if(options.modal??model.settings?.modal??true) {
+    try {
+      if(!factor)throw new AnalysisError('No free DOFs are available for modal analysis.');
+      if(!(asm.totalMass>0))throw new AnalysisError('No positive mass source is present. Define material density or joint masses.');
+      onProgress({stage:'Solving generalized eigenproblem'});
+      const requestedModes=options.modes??model.settings?.modes??6;
+      const eig=lowestModes(asm.K,asm.M,factor,requestedModes,{onProgress});
+      if(eig.length<requestedModes)asm.warnings.push(`Only ${eig.length} finite positive-mass modes are available in the resolved mass subspace (${requestedModes} requested).`);
+      for(let i=0;i<eig.length;i++) {
+        const e=eig[i],u=physicalDisplacement(asm,e.x);let imax=0;
+        for(let j=0;j<u.length;j++)if(j%6<3&&Math.abs(u[j])>Math.abs(u[imax]))imax=j;
+        if(u[imax]<0){for(let j=0;j<u.length;j++)u[j]=-u[j];for(let j=0;j<e.x.length;j++)e.x[j]=-e.x[j];}
+        const members={};let maxDisplacement=0;
+        for(const element of asm.elements) {
+          const localU=Float64Array.from(element.B,map=>evalMap(map,e.x)),curve=new Float64Array(63);
+          for(let j=0;j<=20;j++) {const v=localToGlobal(element.R,memberDisplacement(localU,j/20,element.L,element.section,element.material));curve.set(v,j*3);maxDisplacement=Math.max(maxDisplacement,norm(v));}
+          members[element.id]={localU,curve};
+        }
+        const effectiveMass=asm.influence.map(b=>dot(e.x,b)**2),participation=effectiveMass.map(v=>v/asm.totalMass);
+        modes.push({number:i+1,lambda:e.lambda,frequency:Math.sqrt(e.lambda)/(2*Math.PI),period:2*Math.PI/Math.sqrt(e.lambda),u,members,maxDisplacement,participation,effectiveMass,residual:e.residual,iterations:e.iterations});
+      }
+    }catch(error){modalError=error.message;asm.warnings.push('MODAL: '+error.message);}
+  }
+  const stats={...asm.stats,...factor?.stats,elapsedMs:performance.now()-start};
+  if(stats.minPivot<1e-8)asm.warnings.push(`Very small scaled pivot ${stats.minPivot.toExponential(3)}: review support and stiffness contrasts. This is not a condition-number estimate.`);
+  return {schema:'stratum-results',version:1,static:results,modes,modalError,stats,warnings:asm.warnings,completedAt:new Date().toISOString()};
+}
+
+module.exports={assemble,analyze};
+}};const __cache={};function __require(id){if(__cache[id])return __cache[id].exports;const module={exports:{}};__cache[id]=module;if(!__modules[id])throw new Error('Missing module '+id);__modules[id](module,__require);return module.exports;}__require("src/app.js");})();

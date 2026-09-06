@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#172841"><meta name="description" content="Stratum Frame: a browser-native structural frame modeling and finite-element analysis workbench.">
+  <title>Stratum Frame — Structural Analysis Workbench</title>
+  <link rel="icon" href="assets/favicon.svg" type="image/svg+xml"><link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div id="application">
+  <header class="titlebar">
+    <div class="brand"><span class="brand-symbol" data-icon="layers" data-size="26"></span><span>stratum<span class="brand-light">frame</span></span><span class="edition">STRUCTURAL WORKBENCH</span></div>
+    <div class="document-title"><span id="document-name">Atrium Office · 6-story frame</span><span id="dirty-indicator" class="document-dot" title="Autosaved locally"></span></div>
+    <button class="title-button" data-action="help"><span data-icon="info" data-size="15"></span><span>Analysis notes</span></button><span class="version-tag">1.0</span>
+  </header>
+  <nav class="menubar" aria-label="Application menus">
+    <div class="menus" id="menus"></div>
+    <div class="workspace-label"><span class="live-dot"></span> Local workspace <span class="menu-separator">|</span><button data-action="benchmarks">Verification suite</button></div>
+  </nav>
+  <div class="ribbon" aria-label="Modeling tools">
+    <div class="ribbon-group file-tools">
+      <div class="ribbon-row"><button class="icon-button" title="New model (Ctrl+N)" data-action="new" data-icon="new"></button><button class="icon-button" title="Open project (Ctrl+O)" data-action="open" data-icon="open"></button><button class="icon-button" title="Save project (Ctrl+S)" data-action="save" data-icon="save"></button></div>
+      <div class="ribbon-row"><button class="icon-button" title="Undo (Ctrl+Z)" data-action="undo" data-icon="undo"></button><button class="icon-button" title="Redo (Ctrl+Y)" data-action="redo" data-icon="redo"></button><button class="icon-button" title="Fit both views (F)" data-action="fit" data-icon="fit"></button></div><span class="group-caption">PROJECT</span>
+    </div>
+    <div class="ribbon-group"><div class="ribbon-row stretch">
+      <button class="ribbon-button active" data-tool="select" title="Select joints and frames"><span data-icon="select"></span><span>Select</span></button>
+      <button class="ribbon-button" data-tool="beam" title="Draw beams in the plan view (B)"><span data-icon="beam"></span><span>Beam</span></button>
+      <button class="ribbon-button" data-tool="column" title="Draw columns between the active story and story below (C)"><span data-icon="column"></span><span>Column</span></button>
+      <button class="ribbon-button" data-tool="joint" title="Add a joint in plan (J)"><span data-icon="joint"></span><span>Joint</span></button>
+      <button class="ribbon-button" data-tool="move" title="Move a joint in plan (M)"><span data-icon="move"></span><span>Move</span></button>
+    </div><span class="group-caption">MODEL</span></div>
+    <div class="ribbon-group"><div class="ribbon-row stretch">
+      <button class="ribbon-button" data-action="stories"><span data-icon="story"></span><span>Stories</span></button>
+      <button class="ribbon-button" data-action="sections"><span data-icon="section"></span><span>Sections</span></button>
+      <button class="ribbon-button" data-action="materials"><span data-icon="material"></span><span>Materials</span></button>
+    </div><span class="group-caption">DEFINE</span></div>
+    <div class="ribbon-group"><div class="ribbon-row stretch">
+      <button class="ribbon-button" data-action="supports"><span data-icon="support"></span><span>Restraints</span></button>
+      <button class="ribbon-button" data-action="load"><span data-icon="load"></span><span>Loads</span></button>
+      <button class="ribbon-button" data-action="diaphragms"><span data-icon="diaphragm"></span><span>Diaphragm</span></button>
+    </div><span class="group-caption">ASSIGN</span></div>
+    <div class="ribbon-group analysis-group"><div class="ribbon-row stretch">
+      <button class="run-button" data-action="run" id="run-button"><span data-icon="play" data-size="20"></span><span>Run analysis<small>LINEAR STATIC + MODAL</small></span></button>
+      <button class="icon-button" data-action="validate" title="Check model" data-icon="check"></button>
+    </div><span class="group-caption">ANALYZE</span></div>
+    <div class="ribbon-group display-group"><div class="ribbon-row stretch">
+      <button class="ribbon-button" data-action="deformed"><span data-icon="deform"></span><span>Deformed</span></button>
+      <button class="ribbon-button" data-action="forces"><span data-icon="chart"></span><span>Forces</span></button>
+      <button class="ribbon-button" data-action="modes"><span data-icon="mode"></span><span>Modes</span></button>
+    </div><span class="group-caption">RESULTS</span></div>
+  </div>
+  <div class="workspace">
+    <aside class="explorer panel">
+      <div class="panel-heading"><span>MODEL EXPLORER</span><button class="icon-button tiny" data-action="json" title="Edit complete model JSON" data-icon="code"></button></div>
+      <div class="explorer-tabs"><button class="selected" data-explorer="model">Model</button><button data-explorer="loads">Loads</button><button data-explorer="results">Results</button></div>
+      <div class="search-box"><span data-icon="search" data-size="14"></span><input id="tree-search" placeholder="Find objects or stories…" aria-label="Search model tree"><kbd>/</kbd></div>
+      <div id="model-tree" class="model-tree"></div>
+      <div class="explorer-footer"><span class="badge-outline">3D FRAME</span><div>Explicit joints · 6 DOF each</div><small>No shell or design-code elements</small></div>
+    </aside>
+    <main class="main-workspace">
+      <div class="workspace-tabs"><button class="workspace-tab active" data-action="model-view"><span data-icon="cube" data-size="15"></span>Structural model</button><button class="workspace-tab" data-action="deformed"><span data-icon="chart" data-size="15"></span>Analysis results</button><span class="workspace-spacer"></span><span class="analysis-state" id="analysis-state"><span class="live-dot"></span> Ready to analyze</span></div>
+      <div class="view-controls">
+        <label><span class="label-muted">Display</span><select id="display-select" aria-label="Result display"><option value="model">Undeformed model</option value="loads">Applied loads</option><option value="deformed">Deformed shape</option><option value="mode">Mode shape</option><option value="axial">Axial force · P</option><option value="v2">Shear · V2</option><option value="v3">Shear · V3</option><option value="torsion">Torsion · T</option><option value="m2">Moment · M2</option><option value="m3">Moment · M3</option><option value="reactions">Support reactions</option></select></label>
+        <label><span class="label-muted">Case</span><select id="case-select" aria-label="Active load case"></select></label>
+        <label class="mode-control hidden"><span class="label-muted">Mode</span><select id="mode-select" aria-label="Mode number"></select></label>
+        <button class="icon-button small" data-action="animate" title="Animate current mode or deformation" data-icon="play" id="animate-button"></button>
+        <span class="control-divider"></span><button class="icon-button small toggled" data-toggle="extrude" title="Extruded sections" data-icon="section"></button><button class="icon-button small toggled" data-toggle="grids" title="Show grids and levels" data-icon="grid"></button><button class="icon-button small" data-toggle="labels" title="Object labels" id="labels-button">Aa</button><button class="icon-button small" data-action="view-options" title="Display settings" data-icon="settings"></button>
+      </div>
+      <div class="viewports" id="viewports">
+        <section class="viewport-panel main-viewport">
+          <div class="viewport-heading"><span><i class="view-dot"></i><b id="main-view-title">3D View</b><span class="viewport-subtitle">Orthographic workspace</span></span><div><select id="main-story-select" class="hidden" aria-label="Main view active story"></select><button class="view-pill selected" data-action="3d">3D</button><button class="view-pill" data-action="elevation">XZ</button><button class="icon-button tiny" title="Fit model" data-action="fit-main" data-icon="fit"></button></div></div>
+          <div class="canvas-wrap" id="main-canvas-wrap"><canvas id="main-canvas" aria-label="3D structural frame rendering"></canvas><canvas id="main-overlay" class="overlay" aria-label="3D model editing surface" tabindex="0"></canvas>
+            <div class="viewport-chip" id="result-chip"><span class="chip-dot"></span>Section assignments</div>
+            <div class="viewport-legend" id="main-legend"><span><i class="column-color"></i>Columns</span><span><i class="beam-color"></i>Beams</span><span><i class="support-color"></i>Restraints</span></div>
+          </div>
+          <div class="viewport-footnote"><span id="main-hint">Drag to orbit · scroll to zoom · Shift-drag to box select</span><span id="selection-count">0 selected</span></div>
+        </section>
+        <div class="viewport-splitter" id="viewport-splitter" role="separator" aria-label="Resize viewports"></div>
+        <section class="viewport-panel plan-viewport">
+          <div class="viewport-heading"><span><i class="view-dot plan"></i><b>Plan View</b></span><div><select id="story-select" aria-label="Active story"></select><button class="icon-button tiny" data-action="fit-plan" title="Fit plan view" data-icon="fit"></button></div></div>
+          <div class="canvas-wrap"><canvas id="plan-canvas" aria-label="Story plan rendering"></canvas><canvas id="plan-overlay" class="overlay" tabindex="0" aria-label="Plan editing surface"></canvas><div class="plan-info" id="plan-info">Story 06 · +20.400 m</div></div>
+          <div class="viewport-footnote"><span><span class="snap-dot"></span> <button data-toggle="snap" id="snap-toggle">Grid snap on</button></span><span id="coordinates">X 0.000 &nbsp; Y 0.000</span></div>
+        </section>
+      </div>
+      <div class="results-splitter" id="results-splitter" role="separator" aria-label="Resize results panel"></div>
+      <section class="results-panel" id="results-panel">
+        <div class="results-heading"><div class="result-tabs" id="result-tabs"><button class="active" data-table="stories">Story response</button><button data-table="joints">Joint displacements</button><button data-table="reactions">Reactions</button><button data-table="members">Frame forces</button><button data-table="modes">Modal results</button><button data-table="diagnostics">Analysis log <span id="log-count">0</span></button></div><button class="text-button" data-action="csv"><span data-icon="download" data-size="13"></span> Export CSV</button></div>
+        <div id="result-table" class="result-table"></div>
+      </section>
+    </main>
+    <aside class="inspector panel"><div class="panel-heading"><span>PROPERTIES</span><button class="icon-button tiny" data-action="clear-selection" data-icon="close" title="Clear selection"></button></div><div id="inspector-content"></div></aside>
+  </div>
+  <footer class="statusbar"><span class="status-message" id="status-message"><span class="live-dot"></span>Ready</span><span id="model-counts">84 joints · 174 frames</span><span class="status-divider"></span><span id="gpu-status"><span data-icon="bolt" data-size="12"></span>Initializing renderer</span><span class="status-divider"></span><span id="dof-status">Float64 analysis</span><span class="status-spacer"></span><span class="status-warning">RESEARCH BUILD · NOT FOR DESIGN APPROVAL</span><select id="unit-select" aria-label="Display units"><option value="SI">kN, m</option><option value="MM">N, mm</option><option value="US">kip, ft</option></select></footer>
+</div>
+<dialog id="dialog"><form method="dialog" id="dialog-form"><div class="dialog-heading"><div><span class="dialog-eyebrow" id="dialog-eyebrow">STRATUM FRAME</span><h2 id="dialog-title"></h2></div><button value="cancel" class="icon-button" aria-label="Close dialog" data-icon="close"></button></div><div id="dialog-content"></div><div id="dialog-error" role="alert"></div><div class="dialog-footer"><span id="dialog-note"></span><button value="cancel" class="secondary-button">Cancel</button><button id="dialog-submit" type="button" class="primary-button">Apply changes</button></div></form></dialog>
+<div id="popup-menu" class="popup-menu hidden"></div><div id="toast" class="toast hidden" role="status"></div>
+<input type="file" id="file-input" accept=".json,.stratum,application/json" hidden>
+<script type="module" src="src/app.js"></script>
+</body>
+</html>

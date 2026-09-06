@@ -1,0 +1,431 @@
+{
+  "generatedAt": "2026-09-06T18:42:29.330Z",
+  "runtime": "v22.16.0",
+  "note": "Computed reference summaries, not preloaded application results. Recompute with this script.",
+  "models": {
+    "atrium-six-story": {
+      "stats": {
+        "joints": 84,
+        "frames": 174,
+        "physicalDOFs": 504,
+        "activeDOFs": 234,
+        "internalDOFs": 0,
+        "excludedDOFs": 0,
+        "totalMass": 558000,
+        "minPivot": 0.13005405789970606,
+        "profile": 11065,
+        "nonzeros": 3058,
+        "bandwidth": 88,
+        "elapsedMs": 272.34274100000005
+      },
+      "frequencies": [
+        1.7366159576381104,
+        1.8090816017809535,
+        1.9327396383155944,
+        5.470828098843536,
+        5.667658159426238,
+        6.049014298347732
+      ],
+      "modalResiduals": [
+        6.815311928014334e-14,
+        7.359963017585323e-14,
+        6.6696685370053645e-15,
+        3.092094352975286e-9,
+        2.6565470949046673e-9,
+        8.143596154480807e-10
+      ],
+      "warnings": [],
+      "modalError": null,
+      "static": {
+        "DEAD": {
+          "maxSampledDisplacementM": 0.0018431194309955511,
+          "relativeResidual": 7.0285355483681336e-15,
+          "appliedResultant": [
+            0,
+            0,
+            -9097168.859999996,
+            -54583013.16,
+            81874519.74000002,
+            0
+          ],
+          "reactionResultant": [
+            1.0913936421275139e-11,
+            -2.4556356947869062e-11,
+            9097168.860000001,
+            54583013.160000026,
+            -81874519.74000002,
+            -4.220055416226387e-10
+          ],
+          "equilibrium": [
+            1.0913936421275139e-11,
+            -2.4556356947869062e-11,
+            5.587935447692871e-9,
+            2.9802322387695312e-8,
+            0,
+            -4.220055416226387e-10
+          ]
+        },
+        "LIVE": {
+          "maxSampledDisplacementM": 0.0006739197336965891,
+          "relativeResidual": 6.837914040715232e-15,
+          "appliedResultant": [
+            0,
+            0,
+            -3060000,
+            -18360000,
+            27540000,
+            0
+          ],
+          "reactionResultant": [
+            9.094947017729282e-13,
+            -7.73070496506989e-12,
+            3060000.000000001,
+            18360000.000000004,
+            -27540000.000000015,
+            -1.1641532182693481e-10
+          ],
+          "equilibrium": [
+            9.094947017729282e-13,
+            -7.73070496506989e-12,
+            9.313225746154785e-10,
+            3.725290298461914e-9,
+            -1.4901161193847656e-8,
+            -1.1641532182693481e-10
+          ]
+        },
+        "WINDX": {
+          "maxSampledDisplacementM": 0.002305207438780696,
+          "relativeResidual": 2.990940818241121e-14,
+          "appliedResultant": [
+            100800,
+            0,
+            0,
+            0,
+            1485120,
+            -604800
+          ],
+          "reactionResultant": [
+            -100800.00000000287,
+            5.958180719264815e-13,
+            1.0550138540565968e-10,
+            8.149072527885437e-10,
+            -1485120.000000039,
+            604800.0000000161
+          ],
+          "equilibrium": [
+            -2.86672729998827e-9,
+            5.958180719264815e-13,
+            1.0550138540565968e-10,
+            8.149072527885437e-10,
+            -3.91155481338501e-8,
+            1.6065314412117004e-8
+          ]
+        },
+        "SERVICE": {
+          "maxSampledDisplacementM": 0.0025170391646921406,
+          "relativeResidual": 7.214932337890047e-15,
+          "appliedResultant": [
+            0,
+            0,
+            -12157168.860000001,
+            -72943013.16,
+            109414519.74000004,
+            0
+          ],
+          "reactionResultant": [
+            1.4551915228366852e-11,
+            -4.547473508864641e-11,
+            12157168.860000001,
+            72943013.16000001,
+            -109414519.74000005,
+            -5.675246939063072e-10
+          ],
+          "equilibrium": [
+            1.4551915228366852e-11,
+            -4.547473508864641e-11,
+            0,
+            1.4901161193847656e-8,
+            -1.4901161193847656e-8,
+            -5.675246939063072e-10
+          ]
+        },
+        "ULS": {
+          "maxSampledDisplacementM": 0.003290014891109204,
+          "relativeResidual": 6.732572178540832e-15,
+          "appliedResultant": [
+            0,
+            0,
+            -15812602.631999988,
+            -94875615.79200004,
+            142313423.68800008,
+            0
+          ],
+          "reactionResultant": [
+            1.8189894035458565e-11,
+            -3.637978807091713e-11,
+            15812602.632000001,
+            94875615.79200003,
+            -142313423.68800002,
+            -7.8580342233181e-10
+          ],
+          "equilibrium": [
+            1.8189894035458565e-11,
+            -3.637978807091713e-11,
+            1.30385160446167e-8,
+            -1.4901161193847656e-8,
+            5.960464477539063e-8,
+            -7.8580342233181e-10
+          ]
+        },
+        "LATERAL": {
+          "maxSampledDisplacementM": 0.0031726630220890437,
+          "relativeResidual": 7.797749299445319e-15,
+          "appliedResultant": [
+            100800,
+            0,
+            -10627168.86,
+            -63763013.160000004,
+            97129639.74000004,
+            -604800
+          ],
+          "reactionResultant": [
+            -100800.00000000284,
+            -2.2737367544323206e-11,
+            10627168.860000001,
+            63763013.16000002,
+            -97129639.74000007,
+            604800.0000000155
+          ],
+          "equilibrium": [
+            -2.837623469531536e-9,
+            -2.2737367544323206e-11,
+            1.862645149230957e-9,
+            1.4901161193847656e-8,
+            -2.9802322387695312e-8,
+            1.548323780298233e-8
+          ]
+        }
+      }
+    },
+    "cantilever-tip-force": {
+      "stats": {
+        "joints": 13,
+        "frames": 12,
+        "physicalDOFs": 78,
+        "activeDOFs": 72,
+        "internalDOFs": 0,
+        "excludedDOFs": 0,
+        "totalMass": 471.00000000000006,
+        "minPivot": 0.07142857142856204,
+        "profile": 204,
+        "nonzeros": 296,
+        "bandwidth": 4,
+        "elapsedMs": 110.02094399999999
+      },
+      "frequencies": [
+        9.283521549005565,
+        18.56704309801113,
+        58.179746361715196,
+        116.3594927234303,
+        162.9225945971349,
+        198.25614557298837
+      ],
+      "modalResiduals": [
+        5.064232516502226e-12,
+        5.064231099751321e-12,
+        6.176465537801471e-14,
+        1.2291332346683513e-13,
+        2.2146458161680545e-12,
+        4.6237291145373595e-9
+      ],
+      "warnings": [],
+      "modalError": null,
+      "static": {
+        "TEST": {
+          "maxSampledDisplacementM": 0.007714285714291542,
+          "relativeResidual": 3.0969360476917974e-12,
+          "appliedResultant": [
+            0,
+            0,
+            -12000,
+            0,
+            36000,
+            0
+          ],
+          "reactionResultant": [
+            0,
+            0,
+            12000.000000006752,
+            0,
+            -36000.00000002548,
+            0
+          ],
+          "equilibrium": [
+            0,
+            0,
+            6.752088665962219e-9,
+            0,
+            -2.5480403564870358e-8,
+            0
+          ]
+        }
+      }
+    },
+    "fixed-fixed-udl": {
+      "stats": {
+        "joints": 2,
+        "frames": 1,
+        "physicalDOFs": 12,
+        "activeDOFs": 0,
+        "internalDOFs": 0,
+        "excludedDOFs": 0,
+        "totalMass": 471.0000000000001,
+        "elapsedMs": 1.1065689999999222
+      },
+      "frequencies": [],
+      "modalResiduals": [],
+      "warnings": [],
+      "modalError": null,
+      "static": {
+        "TEST": {
+          "maxSampledDisplacementM": 0.00006026785714285713,
+          "relativeResidual": 0,
+          "appliedResultant": [
+            0,
+            0,
+            -12000,
+            0,
+            18000,
+            0
+          ],
+          "reactionResultant": [
+            0,
+            0,
+            12000,
+            0,
+            -18000,
+            0
+          ],
+          "equilibrium": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        }
+      }
+    },
+    "released-end-udl": {
+      "stats": {
+        "joints": 2,
+        "frames": 1,
+        "physicalDOFs": 12,
+        "activeDOFs": 2,
+        "internalDOFs": 2,
+        "excludedDOFs": 0,
+        "totalMass": 471.0000000000001,
+        "minPivot": 0.7499999999999998,
+        "profile": 3,
+        "nonzeros": 4,
+        "bandwidth": 1,
+        "elapsedMs": 1.623625000000061
+      },
+      "frequencies": [],
+      "modalResiduals": [],
+      "warnings": [],
+      "modalError": null,
+      "static": {
+        "TEST": {
+          "maxSampledDisplacementM": 0.0003013392857142857,
+          "relativeResidual": 5.465382970008537e-16,
+          "appliedResultant": [
+            0,
+            0,
+            -12000,
+            0,
+            18000,
+            0
+          ],
+          "reactionResultant": [
+            0,
+            0,
+            12000,
+            0,
+            -18000,
+            0
+          ],
+          "equilibrium": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        }
+      }
+    },
+    "tip-mass-modes": {
+      "stats": {
+        "joints": 2,
+        "frames": 1,
+        "physicalDOFs": 12,
+        "activeDOFs": 6,
+        "internalDOFs": 0,
+        "excludedDOFs": 0,
+        "totalMass": 100,
+        "minPivot": 0.2500000000000001,
+        "profile": 8,
+        "nonzeros": 10,
+        "bandwidth": 1,
+        "elapsedMs": 0.8010070000000269
+      },
+      "frequencies": [
+        9.925054474356275,
+        19.850108948712553,
+        595.5032684613766
+      ],
+      "modalResiduals": [
+        7.971023446461987e-12,
+        6.148274630869836e-18,
+        2.214172121061571e-15
+      ],
+      "warnings": [
+        "Only 3 finite positive-mass modes are available in the resolved mass subspace (6 requested)."
+      ],
+      "modalError": null,
+      "static": {
+        "TEST": {
+          "maxSampledDisplacementM": 0.0006428571428571424,
+          "relativeResidual": 1.2862197421537487e-15,
+          "appliedResultant": [
+            0,
+            0,
+            -1000,
+            0,
+            3000,
+            0
+          ],
+          "reactionResultant": [
+            0,
+            0,
+            999.9999999999991,
+            0,
+            -2999.999999999998,
+            0
+          ],
+          "equilibrium": [
+            0,
+            0,
+            -9.094947017729282e-13,
+            0,
+            1.8189894035458565e-12,
+            0
+          ]
+        }
+      }
+    }
+  }
+}

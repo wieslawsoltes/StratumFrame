@@ -1,0 +1,130 @@
+{
+  "schema": "stratum-frame",
+  "version": 1,
+  "units": "SI",
+  "name": "Massless cantilever · 100 kg tip mass",
+  "grids": {
+    "x": [
+      0,
+      3
+    ],
+    "y": [
+      0
+    ]
+  },
+  "stories": [
+    {
+      "id": "S0",
+      "name": "Base",
+      "z": 0
+    }
+  ],
+  "materials": [
+    {
+      "id": "MAT",
+      "name": "Elastic",
+      "E": 210000000000,
+      "nu": 0.3,
+      "density": 0
+    }
+  ],
+  "sections": [
+    {
+      "id": "SEC",
+      "name": "Rectangular",
+      "material": "MAT",
+      "b": 0.1,
+      "h": 0.2,
+      "A": 0.020000000000000004,
+      "Iy": 0.00006666666666666668,
+      "Iz": 0.00001666666666666667,
+      "J": 0.00004577604166666668,
+      "shape": "rectangle"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "N0",
+      "x": 0,
+      "y": 0,
+      "z": 0,
+      "mass": 0,
+      "support": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true
+      ]
+    },
+    {
+      "id": "N1",
+      "x": 3,
+      "y": 0,
+      "z": 0,
+      "mass": 100,
+      "support": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        false
+      ]
+    }
+  ],
+  "elements": [
+    {
+      "id": "E0",
+      "i": "N0",
+      "j": "N1",
+      "section": "SEC",
+      "roll": 0,
+      "releases": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false
+      ]
+    }
+  ],
+  "diaphragms": [],
+  "cases": [
+    {
+      "id": "TEST",
+      "name": "Test",
+      "selfWeight": 0
+    }
+  ],
+  "combinations": [],
+  "loads": [
+    {
+      "id": "TIP",
+      "case": "TEST",
+      "type": "nodal",
+      "node": "N1",
+      "value": [
+        0,
+        0,
+        -1000,
+        0,
+        0,
+        0
+      ]
+    }
+  ],
+  "settings": {
+    "modal": true,
+    "modes": 6
+  },
+  "notes": "Independent research workbench. Example combinations are illustrative, not code-approved."
+}
