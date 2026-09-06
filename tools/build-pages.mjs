@@ -9,4 +9,9 @@ for (const path of ['index.html', 'styles.css', 'assets', 'src', 'tests', 'docs'
 }
 await cp(new URL('dist/stratum-frame.html', root), new URL('stratum-frame.html', site));
 await writeFile(new URL('.nojekyll', site), '');
+await writeFile(new URL('build-info.json', site), JSON.stringify({
+  name: 'Stratum Frame',
+  commit: process.env.GITHUB_SHA ?? null,
+  builtAt: new Date().toISOString(),
+}, null, 2) + '\n');
 console.log('Staged _site with native modules, worker, examples, documentation and standalone download.');
